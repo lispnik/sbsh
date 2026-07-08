@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL and ocicl (Linux)
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl
+          gh release download --repo ocicl/ocicl --pattern '*_amd64.deb' --dir /tmp
+          sudo dpkg -i /tmp/ocicl_*_amd64.deb
+          ocicl setup > ~/.sbclrc
+
+      - name: Install SBCL and ocicl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install sbcl ocicl
+          ocicl setup > ~/.sbclrc
+
+      - name: Show versions
+        run: |
+          sbcl --version
+          ocicl version
+
+      - name: Install dependencies
+        run: ocicl install
+
+      - name: Run tests
+        run: make test
+
+      - name: Build executable
+        run: make build
+
+      - name: Smoke-test the binary
+        run: |
+          ./sbsh --version
+          ./sbsh -c 'echo ci ok | tr a-z A-Z'
+          test "$(./sbsh -c 'printf "b\na\nc\n" | sort | tr -d "\n"')" = "abc"
