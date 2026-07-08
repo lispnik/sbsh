@@ -1,0 +1,22 @@
+# sample.sbsh --- a script executed by `sbsh sample.sbsh`
+# Demonstrates that sbsh runs script files line by line.
+
+echo "== running a script file =="
+
+# Variables and expansion
+GREETING=hello
+echo "greeting is: $GREETING (pid $$)"
+
+# A pipeline feeding a redirection
+printf "pear\napple\nbanana\napple\n" | sort | uniq -c > /tmp/sbsh_demo_fruit.txt
+echo "unique fruit counts:"
+cat /tmp/sbsh_demo_fruit.txt
+
+# Conditional execution driven by exit status
+grep -q banana /tmp/sbsh_demo_fruit.txt && echo "found banana" || echo "no banana"
+
+# Arithmetic-free status check
+false
+echo "exit status of false was: $?"
+
+echo "== script done =="

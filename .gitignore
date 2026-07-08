@@ -1,0 +1,13 @@
+# Compiled Lisp
+*.fasl
+*.fasl-*
+
+# Built executable
+/sbsh
+
+# ocicl-vendored dependencies (restore with `ocicl install`)
+/ocicl/
+/systems/
+
+# Shell history produced at runtime
+.sbsh_history
