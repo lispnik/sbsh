@@ -161,12 +161,32 @@ NIL when nothing matches (the caller then keeps the literal word)."
              (write-string val out) (setf i ni)))
           (t (write-char c out) (incf i)))))))
 
+(defun read-balanced-parens (string i)
+  "STRING[i] is an open paren.  Return (values INNER-TEXT INDEX-AFTER-CLOSE),
+where INNER-TEXT excludes the outer parens.  Tracks nesting and quotes."
+  (let ((n (length string)) (depth 0) (q nil) (start (1+ i)))
+    (loop for j from i below n
+          for c = (char string j)
+          do (cond
+               (q (when (char= c q) (setf q nil)))
+               ((or (char= c #\') (char= c #\")) (setf q c))
+               ((char= c #\() (incf depth))
+               ((char= c #\))
+                (decf depth)
+                (when (zerop depth)
+                  (return-from read-balanced-parens
+                    (values (subseq string start j) (1+ j)))))))
+    (error 'shell-parse-error :message "unterminated $( ")))
+
 (defun read-variable (string i)
-  "Read a $NAME or ${NAME} reference starting after the $ at I.
+  "Read a $NAME, ${NAME}, or $(...) reference starting after the $ at I.
 Returns (values VALUE INDEX-AFTER)."
   (let ((n (length string)))
     (cond
       ((>= i n) (values "$" i))
+      ((char= (char string i) #\()
+       (multiple-value-bind (body end) (read-balanced-parens string i)
+         (values (command-substitute body) end)))
       ((char= (char string i) #\{)
        (let ((end (position #\} string :start i)))
          (unless end (error 'shell-parse-error :message "unterminated ${"))

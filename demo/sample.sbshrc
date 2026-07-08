@@ -1,0 +1,43 @@
+;;;; sample.sbshrc --- an example sbsh init file.
+;;;;
+;;;; Copy to ~/.sbshrc.  It is ordinary Common Lisp, evaluated in the
+;;;; SBSH-USER package with the sbsh API available.
+
+;;; Aliases -----------------------------------------------------------------
+(defalias "ll"  "ls -laFh")
+(defalias "gs"  "git status")
+(defalias ".."  "cd ..")
+
+;;; A builtin written in Lisp ----------------------------------------------
+(defcommand "mkcd" (args)
+  "Make a directory and cd into it."
+  (let ((dir (first args)))
+    (ensure-directories-exist (concatenate 'string dir "/"))
+    (sh (concatenate 'string "cd " dir))))
+
+(defcommand "count" (args)
+  "Count lines of each file argument using Lisp."
+  (dolist (f args)
+    (with-open-file (in f :if-does-not-exist nil)
+      (when in
+        (format t "~5D  ~A~%"
+                (loop for l = (read-line in nil) while l count t) f))))
+  0)
+
+;;; A context-aware completion ---------------------------------------------
+(defcompletion "git" (word)
+  (remove-if-not (lambda (c) (search word c))
+                 '("status" "commit" "checkout" "branch" "log" "diff" "push" "pull")))
+
+;;; A custom prompt --------------------------------------------------------
+(defprompt ()
+  (format nil "~A sbsh> "
+          (car (last (pathname-directory
+                      (concatenate 'string (cwd) "/"))))))
+
+;;; A hook that runs after every cd ----------------------------------------
+(on-cd (lambda (dir)
+         (declare (ignore dir))
+         ;; e.g. auto-list a directory on entry:
+         ;; (sh "ls")
+         nil))

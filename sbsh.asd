@@ -13,6 +13,7 @@
   :components ((:module "src"
                 :serial t
                 :components ((:file "package")
+                             (:file "conditions")
                              (:file "ffi")
                              (:file "terminal")
                              (:file "history")
@@ -22,6 +23,7 @@
                              (:file "jobs")
                              (:file "builtins")
                              (:file "exec")
+                             (:file "config")
                              (:file "repl")
                              (:file "main"))))
   :build-operation "program-op"

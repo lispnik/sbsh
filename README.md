@@ -36,7 +36,83 @@ HELLO
   time, so `false; echo $?` and `export X=1; echo $X` behave correctly on one
   line.
 - **Builtins** — `cd`, `pwd`, `exit`, `echo`, `export`, `unset`, `env`, `set`,
-  `history`, `jobs`, `fg`, `bg`, `kill`, `type`, `help`, `true`, `false`, `:`.
+  `history`, `jobs`, `fg`, `bg`, `kill`, `type`, `help`, `alias`, `unalias`,
+  `snapshot`, `true`, `false`, `:`.
+
+## Common Lisp superpowers
+
+Because the shell *is* a live SBCL image, it does things a POSIX shell cannot.
+
+**A Lisp escape — any line starting with `(` is evaluated as Lisp:**
+
+```
+sbsh$ (+ 1 2 3)
+6
+sbsh$ echo "2^10 = $((expt 2 10))"     # arithmetic is just Lisp
+2^10 = 1024
+```
+
+**Command substitution `$( … )` — shell *or* Lisp:**
+
+```
+sbsh$ echo "there are $(ls /usr/bin | wc -l | tr -d ' ') programs"
+sbsh$ echo "sum: $((reduce (function +) (list 10 20 30)))"
+```
+
+**Lisp functions as pipeline stages** — a stage written `(...)` receives the
+prior stage's output as the list `lines` and emits its result, so processes and
+Lisp compose in one pipeline:
+
+```
+sbsh$ ls /etc | (remove-if-not (lambda (s) (search "conf" s)) lines) | sort | head
+sbsh$ printf "b\na\nc\n" | (sort lines (function string<))
+```
+
+**Interactive error recovery via the condition system** — an unknown command
+signals a correctable condition and offers "did you mean?" restarts:
+
+```
+sbsh$ gti status
+sbsh: gti: command not found
+Did you mean:
+  [1] git
+Run which? [1-1, Enter to cancel] 1
+```
+
+**Hot redefinition** — define or redefine a builtin at the prompt and use it
+immediately; the running image changes underneath you:
+
+```
+sbsh$ (defcommand "hi" (args) (format t "hello ~A~%" (first args)))
+sbsh$ hi world
+hello world
+```
+
+**Homoiconic, queryable history** — every line is stored as structured data
+(text, status, cwd, time, the commands it ran), queryable as Lisp:
+
+```
+sbsh$ (history-where (function failed-p))                       ; everything that failed
+sbsh$ (history-where (lambda (e) (command-used-p "git" e)))     ; every git line
+```
+
+**`~/.sbshrc` is real Common Lisp** with a small DSL — see
+[`demo/sample.sbshrc`](demo/sample.sbshrc):
+
+```lisp
+(defalias "ll" "ls -laFh")
+(defcommand "mkcd" (args)                       ; a builtin in Lisp
+  (ensure-directories-exist (concatenate 'string (first args) "/"))
+  (sh (concatenate 'string "cd " (first args))))
+(defcompletion "git" (word)                     ; context-aware Tab completion
+  '("status" "commit" "checkout" "branch" "log"))
+(defprompt () (format nil "~A sbsh> " (cwd)))   ; the prompt is a function
+(on-cd (lambda (dir) (declare (ignore dir))))   ; hooks are closures
+```
+
+**Image snapshots** — `snapshot my-shell` dumps the live shell (with everything
+you have defined this session) to a standalone executable via
+`save-lisp-and-die`.
 
 ## How it uses SBCL
 
@@ -91,7 +167,8 @@ make run       # load and start the shell without building an image
 
 ```
 make build
-bash demo/demo.sh                 # non-interactive features
+bash demo/demo.sh                 # non-interactive shell features
+bash demo/lisp_demo.sh            # Common Lisp integration
 python3 demo/interactive_demo.py  # line editor + job control, driven over a PTY
 ```
 
@@ -102,16 +179,18 @@ See [`demo/README.md`](demo/README.md) for what each covers.
 ```
 sbsh.asd            system + test-system definitions
 src/
-  package.lisp      package + global shell state
+  package.lisp      packages (sbsh + sbsh-user) and global shell state
+  conditions.lisp   condition types + Levenshtein for suggestions
   ffi.lisp          sb-alien: execvp, tcsetpgrp, tcgetpgrp, isatty
   terminal.lisp     raw/cooked termios modes, window size
-  history.lisp      history storage, persistence, dedup, search
+  history.lisp      history storage/search + structured queryable records
   line-editor.lisp  raw-mode readline: keys, history, C-r, completion
-  lexer.lisp        tokenizer: quoting, expansion, globbing
-  parser.lisp       clauses, pipelines, redirections
+  lexer.lisp        tokenizer: quoting, expansion, globbing, $(...) capture
+  parser.lisp       clauses, pipelines (incl. Lisp stages), aliases
   jobs.lisp         job/process tracking, waitpid reaping
   builtins.lisp     built-in commands
-  exec.lisp         fork/exec, process groups, fg/bg, and-or lists
+  exec.lisp         fork/exec, process groups, fg/bg, Lisp eval, conditions
+  config.lisp       user API + ~/.sbshrc DSL (defalias/defcommand/…)
   repl.lisp         the interactive loop and prompt
   main.lisp         entry point (-c / script / interactive)
 tests/
@@ -120,7 +199,9 @@ tests/
 
 ## Notes / limitations
 
-- No command substitution `$(…)` or here-documents `<<`.
+- No here-documents `<<`.  Command substitution `$(…)` is supported (shell and
+  Lisp), but not backticks.
+- Aliases are word-level (no embedded pipes/operators).
 - `echo` is POSIX-style (supports `-n`, not `-e`).
 - Globbing follows the usual dotfile rule (a leading `.` must be matched
   explicitly).

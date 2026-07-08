@@ -104,6 +104,15 @@ foreground, restore default signal handling, wire up fds, and redirect."
 (defun fork-command (cmd pgid infd outfd foreground fds-to-close)
   "Fork and exec CMD.  Returns the child pid in the parent; never returns in
 the child.  argv is built before the fork so the child does no allocation."
+  ;; A Lisp filter stage: fork and run the form as a Lisp filter over stdin.
+  (when (command-lisp cmd)
+    (let ((pid (sb-posix:fork)))
+      (if (not (zerop pid))
+          (return-from fork-command pid)
+          (progn
+            (child-setup pgid infd outfd foreground fds-to-close nil)
+            (run-lisp-filter (command-lisp cmd))
+            (sb-ext:exit :code 0 :abort t)))))
   (let* ((argv (command-argv cmd))
          (builtin (and argv (builtin-p (first argv))))
          (alien-argv (and argv (not builtin) (build-argv argv)))
@@ -176,6 +185,7 @@ the child.  argv is built before the fork so the child does no allocation."
   (let ((cmds (pipeline-commands pipeline)))
     (and (= (length cmds) 1)
          (not (pipeline-background pipeline))
+         (not (command-lisp (first cmds)))
          (let ((argv (command-argv (first cmds))))
            (or (null argv) (builtin-p (first argv)))))))
 
@@ -219,11 +229,21 @@ command's ARGV to the remaining words.  Returns nothing."
 (defun launch-pipeline (pipeline)
   "Fork the commands of PIPELINE into a process group and run it."
   (mapc #'realize-command (pipeline-commands pipeline))
-  ;; Leading VAR=value assignments on the first command set the environment.
-  (when (pipeline-commands pipeline)
-    (strip-leading-assignments (first (pipeline-commands pipeline))))
+  (dolist (c (pipeline-commands pipeline))
+    (push (if (command-lisp c) (list :lisp) (command-argv c)) *line-commands*))
+  (let ((cmds (pipeline-commands pipeline)))
+    ;; A single Lisp `(...)` stage runs in the shell process itself, so that
+    ;; definitions and assignments affect the live image (hot reloading).
+    (when (and (= (length cmds) 1)
+               (command-lisp (first cmds))
+               (not (pipeline-background pipeline)))
+      (return-from launch-pipeline (run-lisp-in-process (command-lisp (first cmds)))))
+    ;; Leading VAR=value assignments on the first command set the environment.
+    (when (first cmds)
+      (strip-leading-assignments (first cmds))))
   (when (standalone-builtin-p pipeline)
     (return-from launch-pipeline (run-standalone-builtin pipeline)))
+  (preflight-commands pipeline)
   (let* ((cmds (pipeline-commands pipeline))
          (bg (pipeline-background pipeline))
          (foreground (not bg))
@@ -286,3 +306,173 @@ reflect state produced by earlier clauses on the same line."
                 (:or (not (zerop *last-status*)))
                 (t t))))))
   *last-status*)
+
+;;; --- Top-level entry with condition handling ----------------------------
+
+(defun execute-line (line)
+  "Execute LINE with the condition handlers appropriate to the context.
+Interactive sessions get a `command-not-found` correction menu; all contexts
+fall back to exit status 127 when a command cannot be found."
+  (let ((*line-commands* '()))
+    (prog1
+        (handler-case
+            (handler-bind
+                ((command-not-found
+                   (lambda (c)
+                     (when (and *interactive* (not *capturing*))
+                       (let ((choice (offer-correction c)))
+                         (when choice (invoke-restart 'use-command choice)))))))
+              (run-command-line line))
+          (command-not-found (c)
+            (unless *interactive*
+              (format *error-output* "sbsh: ~A: command not found~%"
+                      (command-not-found-name c)))
+            (setf *last-status* 127))
+          (shell-error (c)
+            (format *error-output* "sbsh: ~A~%" c)
+            (setf *last-status* 1)))
+      (record-history-line line))))
+
+;;; --- Command resolution and "did you mean?" suggestions -----------------
+
+(defun resolve-executable (name)
+  "Return the resolved path of external command NAME, or NIL if not found."
+  (path-search name))
+
+(defun suggest-commands (name)
+  "Return up to five builtin/PATH command names within edit distance 2 of NAME."
+  (let ((cands '()))
+    (maphash (lambda (k v) (declare (ignore v)) (push k cands)) *builtins*)
+    (dolist (dir (split-on-char (or (getenv "PATH") "") #\:))
+      (when (plusp (length dir))
+        (dolist (p (ignore-errors
+                    (uiop:directory-files
+                     (concatenate 'string (string-right-trim "/" dir) "/"))))
+          (let ((n (file-namestring p)))
+            (when (plusp (length n)) (push n cands))))))
+    (let ((scored (loop for c in (remove-duplicates cands :test #'string=)
+                        for d = (levenshtein name c 2)
+                        when (<= d 2) collect (cons c d))))
+      (setf scored (sort scored #'< :key #'cdr))
+      (mapcar #'car (subseq scored 0 (min 5 (length scored)))))))
+
+(defun preflight-commands (pipeline)
+  "Before forking, verify each external stage resolves on $PATH.  Signals a
+correctable COMMAND-NOT-FOUND (with a USE-COMMAND restart) otherwise."
+  (dolist (cmd (pipeline-commands pipeline))
+    (let ((argv (command-argv cmd)))
+      (when (and argv
+                 (not (command-lisp cmd))
+                 (not (builtin-p (first argv)))
+                 (not (resolve-executable (first argv))))
+        (restart-case
+            (error 'command-not-found
+                   :name (first argv)
+                   :suggestions (suggest-commands (first argv)))
+          (use-command (new-name)
+            :report "Run a different command instead"
+            (setf (command-argv cmd) (cons new-name (rest argv)))))))))
+
+(defun offer-correction (c)
+  "Interactively present suggestions for a COMMAND-NOT-FOUND condition C.
+Returns the chosen command string, or NIL to give up."
+  (let ((sugg (command-not-found-suggestions c)))
+    (format t "sbsh: ~A: command not found~%" (command-not-found-name c))
+    (when sugg
+      (format t "Did you mean:~%")
+      (loop for s in sugg for i from 1 do (format t "  [~D] ~A~%" i s))
+      (format t "Run which? [1-~D, Enter to cancel] " (length sugg))
+      (force-output)
+      (let* ((line (read-line (tty-in) nil ""))
+             (n (parse-integer line :junk-allowed t)))
+        (when (and n (<= 1 n (length sugg)))
+          (nth (1- n) sugg))))))
+
+;;; --- Lisp evaluation and pipeline stages --------------------------------
+
+(defun print-lisp-value (value)
+  "Print the value of an interactive `(...)` Lisp escape, REPL-style."
+  (unless (null value)
+    (fresh-line)
+    (prin1 value)
+    (terpri)
+    (force-output)))
+
+(defun run-lisp-in-process (form)
+  "Evaluate FORM in the shell process (so definitions mutate the live image),
+print its value, and set the exit status."
+  (handler-case
+      (let* ((*package* *user-package*)
+             (value (progv (list 'sbsh-user::lines 'sbsh-user::input)
+                        (list nil "")
+                      (eval form))))
+        (print-lisp-value value)
+        (setf *last-status* 0))
+    (error (e)
+      (format *error-output* "sbsh: lisp: ~A~%" e)
+      (setf *last-status* 1)))
+  *last-status*)
+
+(defun emit-lisp-result (value out)
+  "Write VALUE to OUT as text: a list becomes one line per element."
+  (cond
+    ((null value))
+    ((stringp value)
+     (write-string value out)
+     (unless (and (plusp (length value))
+                  (char= (char value (1- (length value))) #\Newline))
+       (terpri out)))
+    ((and (listp value) (not (null value)))
+     (dolist (x value) (princ x out) (terpri out)))
+    (t (princ value out) (terpri out))))
+
+(defun run-lisp-filter (form)
+  "In a forked child: read stdin into `lines`/`input`, evaluate FORM, and
+write the result to stdout."
+  (handler-case
+      (let* ((in (sb-sys:make-fd-stream 0 :input t :external-format :utf-8))
+             (out (sb-sys:make-fd-stream 1 :output t :external-format :utf-8))
+             (all (loop for l = (read-line in nil nil) while l collect l))
+             (*package* *user-package*)
+             (value (progv (list 'sbsh-user::lines 'sbsh-user::input)
+                        (list all (format nil "~{~A~%~}" all))
+                      (eval form))))
+        (emit-lisp-result value out)
+        (finish-output out))
+    (error (e)
+      (ignore-errors (format *error-output* "sbsh: lisp: ~A~%" e)))))
+
+;;; --- Command substitution $(...) ----------------------------------------
+
+(defvar *tmp-counter* 0)
+
+(defun temp-file ()
+  (format nil "/tmp/sbsh-sub-~D-~D" (sb-posix:getpid) (incf *tmp-counter*)))
+
+(defun command-substitute (body)
+  "Value of a $(...) substitution.  A leading ( is evaluated as Lisp; anything
+else is run as a shell command whose stdout is captured."
+  (if (lisp-stage-p body)
+      (handler-case
+          (let ((*package* *user-package*))
+            (princ-to-string (eval (read-from-string body))))
+        (error () ""))
+      (capture-command-output body)))
+
+(defun capture-command-output (line)
+  "Run LINE with stdout redirected to a temp file and return its contents,
+with trailing newlines stripped.  Deadlock-free (uses a file, not a pipe)."
+  (let ((tmp (temp-file)))
+    (unwind-protect
+         (let ((*capturing* t))
+           (finish-output *standard-output*)
+           (call-with-shell-redirections
+            (list (list :out 1 tmp))
+            (lambda ()
+              (execute-line line)
+              (finish-output *standard-output*)))
+           (string-right-trim '(#\Newline #\Return)
+                              (if (probe-file tmp)
+                                  (read-file-into-string tmp)
+                                  "")))
+      (ignore-errors (delete-file tmp)))))

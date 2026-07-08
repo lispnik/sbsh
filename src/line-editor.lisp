@@ -193,26 +193,44 @@ character / :eof."
                 (subseq a 0 (or (mismatch a b) (length a))))
               strings)))
 
+(defun first-word (text)
+  "The leading whitespace-delimited word of TEXT (the command name)."
+  (let* ((s (string-left-trim '(#\Space #\Tab) text))
+         (e (position-if (lambda (c) (member c '(#\Space #\Tab))) s)))
+    (subseq s 0 (or e (length s)))))
+
+(defun apply-completion (ed start end token replacements display)
+  "Insert the common prefix of REPLACEMENTS for the token at [START,END); when
+several remain, print DISPLAY as choices and repaint."
+  (cond
+    ((null replacements) (refresh-line ed))
+    ((= (length replacements) 1)
+     (replace-token ed start end (first replacements)))
+    (t (let ((prefix (longest-common-prefix replacements)))
+         (when (> (length prefix) (- end start))
+           (replace-token ed start end prefix))
+         (out "~%~{~A~^  ~}~%" display)
+         (refresh-line ed)))))
+
 (defun complete-token (ed)
-  "Attempt filename completion of the token under the cursor."
+  "Complete the token under the cursor: a command-specific completion (from
+DEFCOMPLETION) when one is registered for the command, else a filename."
   (let* ((text (ed-text ed)) (point (led-point ed)))
     (multiple-value-bind (start end) (current-token-bounds text point)
-      (let ((token (subseq text start end)))
-        (multiple-value-bind (names dir base) (completion-candidates token)
-          (declare (ignore base))
-          (when names
-            (let ((prefix (longest-common-prefix names)))
-              (cond
-                ((= (length names) 1)
-                 (replace-token ed start end (concatenate 'string dir (first names))))
-                ((> (length prefix) 0)
-                 (replace-token ed start end (concatenate 'string dir prefix))
-                 (when (> (length names) 1)
-                   ;; Show the choices, then repaint the prompt line.
-                   (out "~%")
-                   (out "~{~A~^  ~}~%" names)
-                   (refresh-line ed)))
-                (t (refresh-line ed))))))))))
+      (let* ((token (subseq text start end))
+             (cmd (first-word text))
+             (custom (and (> start 0) (gethash cmd *completions*))))
+        (if custom
+            (let ((cands (sort (remove-if-not
+                                (lambda (c) (starts-with-subseq token c))
+                                (ignore-errors (funcall custom token)))
+                               #'string<)))
+              (apply-completion ed start end token cands cands))
+            (multiple-value-bind (names dir base) (completion-candidates token)
+              (declare (ignore base))
+              (apply-completion ed start end token
+                                (mapcar (lambda (n) (concatenate 'string dir n)) names)
+                                names)))))))
 
 (defun replace-token (ed start end new-text)
   (let ((text (ed-text ed)))

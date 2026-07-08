@@ -174,6 +174,61 @@
     (is (= 1 (sbsh::history-search-backward "git" 1)))
     (is (null (sbsh::history-search-backward "zzz" 2)))))
 
+;;; --- Common Lisp extensions ---------------------------------------------
+
+(test levenshtein-distance
+  (is (= 0 (sbsh::levenshtein "echo" "echo")))
+  (is (= 1 (sbsh::levenshtein "ecgo" "echo")))
+  (is (= 2 (sbsh::levenshtein "gti" "git")))     ; two adjacent substitutions
+  (is (= 3 (sbsh::levenshtein "kitten" "sitting"))))
+
+(test lisp-stage-detection
+  (is-true  (sbsh::lisp-stage-p "(sort lines)"))
+  (is-true  (sbsh::lisp-stage-p "   (+ 1 2)"))
+  (is-false (sbsh::lisp-stage-p "ls -l"))
+  (is-false (sbsh::lisp-stage-p "echo (")))
+
+(test pipeline-stage-splitting
+  ;; A | inside parens (a Lisp form or $()) must not split the pipeline.
+  (is (equal '("a " " b " " c") (sbsh::split-pipeline-stages "a | b | c")))
+  (is (= 1 (length (sbsh::split-pipeline-stages "(logior a b)"))))
+  (is (= 2 (length (sbsh::split-pipeline-stages "ls | (sort lines)")))))
+
+(test lisp-stage-parsing
+  (let* ((clauses (sbsh::parse-line "ls | (sort lines)"))
+         (cmds (sbsh::pipeline-commands (sbsh::clause-pipeline (first clauses)))))
+    (is (= 2 (length cmds)))
+    (is (null (sbsh::command-lisp (first cmds))))
+    (is (equal '(sbsh-user::sort sbsh-user::lines) (sbsh::command-lisp (second cmds))))))
+
+(test alias-expansion
+  (let ((sbsh::*aliases* (make-hash-table :test 'equal)))
+    (sbsh::defalias "ll" "ls -laF")
+    (let* ((clauses (sbsh::parse-line "ll /tmp"))
+           (cmd (first (sbsh::pipeline-commands
+                        (sbsh::clause-pipeline (first clauses))))))
+      (is (equal '("ls" "-laF" "/tmp") (sbsh::command-argv cmd))))))
+
+(test structured-history-query
+  (let ((sbsh::*history-records* (make-array 0 :adjustable t :fill-pointer 0))
+        (sbsh::*history-persist* nil))
+    (vector-push-extend (list :text "false" :status 1 :commands '(("false")))
+                        sbsh::*history-records*)
+    (vector-push-extend (list :text "echo hi" :status 0 :commands '(("echo" "hi")))
+                        sbsh::*history-records*)
+    (vector-push-extend (list :text "grep x f" :status 0 :commands '(("grep" "x" "f")))
+                        sbsh::*history-records*)
+    (is (= 1 (length (sbsh::history-where #'sbsh::failed-p))))
+    (is (equal '("echo hi")
+               (mapcar #'sbsh::entry-text
+                       (sbsh::history-where
+                        (lambda (e) (sbsh::command-used-p "echo" e))))))))
+
+(test balanced-parens-reader
+  (multiple-value-bind (inner after) (sbsh::read-balanced-parens "(a (b) c)xyz" 0)
+    (is (string= "a (b) c" inner))
+    (is (= 9 after))))
+
 ;;; --- Line editor helpers ------------------------------------------------
 
 (test visible-length-strips-ansi

@@ -14,6 +14,17 @@ Walks through word splitting & quoting, pipelines, all redirection forms
 globbing, `VAR=value` assignments, built-ins, running a script file
 (`demo/sample.sbsh`), and exit-status propagation.
 
+## Common Lisp integration
+
+```
+bash demo/lisp_demo.sh
+```
+
+Shows the Lisp escape (`(...)`), arithmetic and command substitution via
+`$(...)`, and Lisp functions used as pipeline stages (mixing Unix processes and
+Lisp in one pipeline).  See [`sample.sbshrc`](sample.sbshrc) for the init-file
+DSL (aliases, Lisp builtins, completions, prompt, hooks).
+
 ## Interactive features (via a pseudo-terminal)
 
 ```
@@ -36,5 +47,7 @@ These need a TTY, which is why they run under `pty` rather than plain pipes.
 | File                   | Purpose                                    |
 |------------------------|--------------------------------------------|
 | `demo.sh`              | batch driver for non-interactive features  |
+| `lisp_demo.sh`         | Common Lisp integration (eval, `$()`, Lisp stages) |
 | `sample.sbsh`          | a script file executed by `sbsh`           |
+| `sample.sbshrc`        | an example `~/.sbshrc` init file           |
 | `interactive_demo.py`  | PTY driver for the interactive line editor & job control |

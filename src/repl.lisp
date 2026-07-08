@@ -3,7 +3,14 @@
 (in-package #:sbsh)
 
 (defun format-prompt ()
-  "Build the interactive prompt: user@host:cwd$ with a color when a TTY."
+  "Build the interactive prompt.  Uses the user's *PROMPT-FN* when set."
+  (or (when *prompt-fn*
+        (handler-case (let ((*package* *user-package*)) (funcall *prompt-fn*))
+          (error () nil)))
+      (default-prompt)))
+
+(defun default-prompt ()
+  "The built-in prompt: user@host:cwd$ with color on a TTY."
   (let* ((user (or (getenv "USER") "?"))
          (host (short-hostname))
          (cwd (pretty-cwd))
@@ -40,6 +47,8 @@ Returns a string, :EOF, or :CANCEL."
   "Main interactive loop.  Returns the shell's exit code."
   (init-job-control)
   (ignore-errors (load-history))
+  (ignore-errors (load-records))
+  (ignore-errors (load-rc-file))
   (loop
     (when *should-exit* (return *should-exit*))
     ;; Report background jobs that changed state.
@@ -54,5 +63,5 @@ Returns a string, :EOF, or :CANCEL."
          (setf *last-status* 130))         ; 128 + SIGINT
         ((and (stringp line) (plusp (length (string-trim '(#\Space #\Tab) line))))
          (history-add line)
-         (run-command-line line))
+         (execute-line line))
         (t nil)))))

@@ -43,6 +43,7 @@
           (sb-posix:setenv "OLDPWD" old 1)
           (when (and target (string= target "-"))
             (format t "~A~%" (sb-posix:getcwd)))
+          (run-cd-hooks (sb-posix:getcwd))
           0)
       (sb-posix:syscall-error ()
         (format *error-output* "cd: ~A: No such file or directory~%" dest)
@@ -180,6 +181,40 @@ Names containing a slash are returned as-is if executable."
 (define-builtin "true" (args) 0)
 (define-builtin ":" (args) 0)
 (define-builtin "false" (args) 1)
+
+(define-builtin "alias" (args)
+  (cond
+    ((null args)
+     (let (names)
+       (maphash (lambda (k v) (declare (ignore v)) (push k names)) *aliases*)
+       (dolist (name (sort names #'string<))
+         (format t "alias ~A='~{~A~^ ~}'~%" name (gethash name *aliases*))))
+     0)
+    (t
+     (dolist (a args)
+       (let ((eq (position #\= a)))
+         (if eq
+             (defalias (subseq a 0 eq) (subseq a (1+ eq)))
+             (if (nth-value 1 (gethash a *aliases*))
+                 (format t "alias ~A='~{~A~^ ~}'~%" a (gethash a *aliases*))
+                 (format *error-output* "alias: ~A: not found~%" a)))))
+     0)))
+
+(define-builtin "unalias" (args)
+  (dolist (a args) (unalias a))
+  0)
+
+(define-builtin "snapshot" (args)
+  "Dump the live shell -- with everything defined this session -- to an
+executable image, then exit.  Demonstrates image-based shells."
+  (let ((path (or (first args) "sbsh-snapshot")))
+    (format t "Saving shell image to ~A ...~%" path)
+    (finish-output)
+    (save-history)
+    ;; save-lisp-and-die ends the process; the new image restarts at MAIN.
+    (sb-ext:save-lisp-and-die path :executable t :toplevel #'main
+                                   :save-runtime-options t)
+    0))
 
 (define-builtin "help" (args)
   (format t "sbsh --- a Common Lisp Unix shell~%~%Built-in commands:~%")

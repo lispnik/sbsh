@@ -15,7 +15,7 @@
   (with-open-file (in path :external-format :utf-8)
     (loop for line = (read-line in nil :eof)
           until (or (eq line :eof) *should-exit*)
-          do (run-command-line line)))
+          do (execute-line line)))
   (or *should-exit* *last-status*))
 
 (defun main ()
@@ -32,7 +32,7 @@
            (sb-ext:exit :code 0))
           ((string= (first args) "-c")
            (setf *interactive* nil)
-           (when (second args) (run-command-line (second args)))
+           (when (second args) (execute-line (second args)))
            (sb-ext:exit :code (or *should-exit* *last-status*)))
           (t
            (sb-ext:exit :code (run-script-file (first args)))))
