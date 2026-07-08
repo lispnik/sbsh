@@ -64,6 +64,18 @@ Restore them with:
 ocicl install
 ```
 
+## Install
+
+Prebuilt binaries for Linux (amd64) and macOS (arm64 / x86_64) are attached to
+each [release](https://github.com/lispnik/sbsh/releases):
+
+```
+tar xzf sbsh-<version>-<platform>-<arch>.tar.gz
+./sbsh-<version>-<platform>-<arch>/sbsh
+```
+
+Or build from source (below).
+
 ## Building and running
 
 ```

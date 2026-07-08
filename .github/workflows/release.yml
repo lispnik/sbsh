@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build a release for (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the GitHub release (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
+
+  build:
+    needs: create-release
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, platform: linux, arch: amd64 }
+          - { os: macos-latest,  platform: macos, arch: arm64 }
+          - { os: macos-13,      platform: macos, arch: amd64 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL and ocicl (Linux)
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl
+          gh release download --repo ocicl/ocicl --pattern '*_amd64.deb' --dir /tmp
+          sudo dpkg -i /tmp/ocicl_*_amd64.deb
+          ocicl setup > ~/.sbclrc
+
+      - name: Install SBCL and ocicl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install sbcl ocicl
+          ocicl setup > ~/.sbclrc
+
+      - name: Install dependencies
+        run: ocicl install
+
+      - name: Build and test
+        run: |
+          make test
+          make build
+
+      - name: Package the binary
+        id: package
+        run: |
+          VERSION="${TAG#v}"
+          PKG="sbsh-${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}"
+          mkdir -p "dist/${PKG}"
+          cp sbsh README.md LICENSE "dist/${PKG}/" 2>/dev/null || cp sbsh README.md "dist/${PKG}/"
+          tar -C dist -czf "${PKG}.tar.gz" "${PKG}"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256"
+          else
+            shasum -a 256 "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256"
+          fi
+          echo "pkg=${PKG}" >> "$GITHUB_OUTPUT"
+          ls -la "${PKG}.tar.gz" "${PKG}.tar.gz.sha256"
+
+      - name: Verify the packaged binary runs
+        run: |
+          tar -C /tmp -xzf "${{ steps.package.outputs.pkg }}.tar.gz"
+          "/tmp/${{ steps.package.outputs.pkg }}/sbsh" --version
+          "/tmp/${{ steps.package.outputs.pkg }}/sbsh" -c 'echo release ok | tr a-z A-Z'
+
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            "${{ steps.package.outputs.pkg }}.tar.gz" \
+            "${{ steps.package.outputs.pkg }}.tar.gz.sha256" \
+            --clobber
