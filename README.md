@@ -7,6 +7,8 @@ POSIX bindings and foreign-function interface rather than shelling out, giving
 it real pipelines, real job control, and a from-scratch line editor with
 history.
 
+![sbsh demo](demo/sbsh-demo.gif)
+
 ```
 $ make build
 $ ./sbsh
