@@ -10,7 +10,7 @@ history.
 ```
 $ make build
 $ ./sbsh
-mkennedy@host:~/Projects/common-lisp/sbsh$ echo hello | tr a-z A-Z
+example@host:~/Projects/common-lisp/sbsh$ echo hello | tr a-z A-Z
 HELLO
 ```
 
