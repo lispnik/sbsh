@@ -27,8 +27,12 @@
   (handler-case
       (sb-alien:with-alien ((ws (sb-alien:struct winsize)))
         (if (zerop (%ioctl-winsize fd +tiocgwinsz+ (sb-alien:addr ws)))
-            (values (max 1 (sb-alien:slot ws 'ws-row))
-                    (max 1 (sb-alien:slot ws 'ws-col)))
+            ;; An unset window size (common on freshly-forked Linux ptys)
+            ;; reports 0; fall back to a sane 80x24 rather than 0/1.
+            (let ((rows (sb-alien:slot ws 'ws-row))
+                  (cols (sb-alien:slot ws 'ws-col)))
+              (values (if (plusp rows) rows 24)
+                      (if (plusp cols) cols 80)))
             (values 24 80)))
     (error () (values 24 80))))
 

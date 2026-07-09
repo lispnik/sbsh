@@ -108,12 +108,13 @@ buffer horizontally when it would not otherwise fit."
          (len (length text))
          (pos (led-point ed))
          (start 0))
-    ;; Scroll left until the cursor fits.
-    (loop while (>= (+ plen (- pos start)) cols) do (incf start))
-    ;; Trim the right edge to the terminal width.
+    ;; Scroll left until the cursor fits (never past the cursor or the text).
+    (loop while (and (< start pos) (>= (+ plen (- pos start)) cols)) do (incf start))
+    (setf start (min start len))
+    ;; Trim the right edge to the terminal width (end stays within [start,len]).
     (let ((end len))
-      (loop while (> (+ plen (- end start)) cols) do (decf end))
-      (let ((cursor-col (+ plen (- pos start))))
+      (loop while (and (> end start) (> (+ plen (- end start)) cols)) do (decf end))
+      (let ((cursor-col (max 0 (min (1- (max 1 cols)) (+ plen (- pos start))))))
         (out "~C[0G" #\Escape)             ; cursor to column 0
         (write-string prompt (tty-out))
         (write-string text (tty-out) :start start :end end)
