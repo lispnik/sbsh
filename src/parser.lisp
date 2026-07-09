@@ -23,22 +23,78 @@
 ;;; environment changes made by earlier clauses are visible to later ones.
 
 (defun strip-comment (string)
-  "Remove a trailing # comment from STRING.  A # only starts a comment when it
-is unquoted, outside parens (so Lisp #' and #( survive), and begins a word."
-  (let ((i 0) (n (length string)) (q nil) (boundary t) (depth 0))
+  "Remove # comments (each running to the end of its line) from STRING,
+respecting quotes and parens (so Lisp #' and #( survive).  A # only starts a
+comment when it is unquoted, outside parens, and begins a word.  Works across
+multiple lines so it is safe on continued (multi-line) input."
+  (let ((out (make-string-output-stream))
+        (i 0) (n (length string)) (q nil) (boundary t) (depth 0))
+    (flet ((keep (c) (write-char c out)))
+      (loop while (< i n) do
+        (let ((c (char string i)))
+          (cond
+            (q (keep c) (when (char= c q) (setf q nil)) (setf boundary nil) (incf i))
+            ((char= c #\\)
+             (keep c)
+             (when (< (1+ i) n) (keep (char string (1+ i))))
+             (setf boundary nil) (incf i 2))
+            ((or (char= c #\') (char= c #\")) (keep c) (setf q c) (setf boundary nil) (incf i))
+            ((char= c #\() (keep c) (incf depth) (setf boundary nil) (incf i))
+            ((char= c #\)) (keep c) (when (plusp depth) (decf depth)) (setf boundary nil) (incf i))
+            ((and (char= c #\#) boundary (zerop depth))
+             (loop while (and (< i n) (char/= (char string i) #\Newline)) do (incf i)))
+            (t (keep c)
+               (setf boundary (and (member c '(#\Space #\Tab #\Newline #\Return #\; #\& #\|)) t))
+               (incf i))))))
+    (get-output-stream-string out)))
+
+;;; --- Input completeness / multi-line continuation -----------------------
+
+(defun incomplete-reason (raw)
+  "Return NIL if RAW is a complete command line, or a keyword saying why more
+input is expected: :QUOTE (open quote), :PAREN (unbalanced paren, e.g. a Lisp
+form), :BACKSLASH (trailing line-continuation), or :OPERATOR (dangling | && ||)."
+  (let* ((string (strip-comment raw))
+         (i 0) (n (length string)) (q nil) (depth 0) (trailing-bs nil))
     (loop while (< i n) do
       (let ((c (char string i)))
         (cond
-          (q (when (char= c q) (setf q nil)) (setf boundary nil) (incf i))
-          ((char= c #\\) (setf boundary nil) (incf i 2))
-          ((or (char= c #\') (char= c #\")) (setf q c) (setf boundary nil) (incf i))
-          ((char= c #\() (incf depth) (setf boundary nil) (incf i))
-          ((char= c #\)) (when (plusp depth) (decf depth)) (setf boundary nil) (incf i))
-          ((and (char= c #\#) boundary (zerop depth))
-           (return-from strip-comment (subseq string 0 i)))
-          ((member c '(#\Space #\Tab #\; #\& #\|)) (setf boundary t) (incf i))
-          (t (setf boundary nil) (incf i)))))
-    string))
+          (q (cond ((and (char= c #\\) (char= q #\") (< (1+ i) n)) (incf i 2))
+                   ((char= c q) (setf q nil) (incf i))
+                   (t (incf i))))
+          ((char= c #\\)
+           (if (= i (1- n)) (progn (setf trailing-bs t) (incf i)) (incf i 2)))
+          ((or (char= c #\') (char= c #\")) (setf q c) (incf i))
+          ((char= c #\() (incf depth) (incf i))
+          ((char= c #\)) (when (plusp depth) (decf depth)) (incf i))
+          (t (incf i)))))
+    (cond
+      (q :quote)
+      ((plusp depth) :paren)
+      (trailing-bs :backslash)
+      ((let ((s (string-right-trim '(#\Space #\Tab #\Newline #\Return) string)))
+         (and (plusp (length s))
+              (or (char= (char s (1- (length s))) #\|)          ; ends with | or ||
+                  (and (>= (length s) 2)
+                       (string= "&&" (subseq s (- (length s) 2)))))))
+       :operator)
+      (t nil))))
+
+(defun assemble-logical-line (first next-line-fn)
+  "Starting from FIRST, keep appending lines (obtained by calling NEXT-LINE-FN
+with the incompleteness reason) until the input is complete.  A trailing
+backslash joins directly; other continuations join with a newline.  Stops if
+NEXT-LINE-FN returns :EOF (leaving the parser to report any error)."
+  (loop
+    (let ((reason (incomplete-reason first)))
+      (unless reason (return first))
+      (let ((next (funcall next-line-fn reason)))
+        (cond
+          ((eq next :eof) (return first))
+          ((eq next :cancel) (return :cancel))
+          ((eq reason :backslash)
+           (setf first (concatenate 'string (subseq first 0 (1- (length first))) next)))
+          (t (setf first (concatenate 'string first (string #\Newline) next))))))))
 
 (defun split-clauses (raw-string)
   "Split STRING into a list of (:TEXT seg :TERMINATOR op) plists at top-level

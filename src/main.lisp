@@ -10,12 +10,16 @@
   (format t "  FILE         Read and execute commands from FILE~%"))
 
 (defun run-script-file (path)
-  "Execute each line of the script at PATH non-interactively."
+  "Execute the script at PATH non-interactively, joining continued lines."
   (setf *interactive* nil)
   (with-open-file (in path :external-format :utf-8)
-    (loop for line = (read-line in nil :eof)
-          until (or (eq line :eof) *should-exit*)
-          do (execute-line line)))
+    (loop for raw = (read-line in nil :eof)
+          until (or (eq raw :eof) *should-exit*)
+          do (let ((line (assemble-logical-line
+                          raw (lambda (reason)
+                                (declare (ignore reason))
+                                (read-line in nil :eof)))))
+               (execute-line line))))
   (or *should-exit* *last-status*))
 
 (defun main ()

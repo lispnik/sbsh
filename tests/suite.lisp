@@ -140,6 +140,46 @@
   (is (string= "echo '# literal'" (sbsh::strip-comment "echo '# literal'")))
   (is (string= "echo ab#cd" (sbsh::strip-comment "echo ab#cd"))))
 
+(test input-completeness
+  (is (null (sbsh::incomplete-reason "echo hi")))
+  (is (null (sbsh::incomplete-reason "sleep 5 &")))        ; background: complete
+  (is (null (sbsh::incomplete-reason "echo a; echo b")))
+  (is (null (sbsh::incomplete-reason "(+ 1 2)")))
+  (is (null (sbsh::incomplete-reason "echo \"closed\"")))
+  (is (eq :quote     (sbsh::incomplete-reason "echo 'open")))
+  (is (eq :quote     (sbsh::incomplete-reason "echo \"open")))
+  (is (eq :paren     (sbsh::incomplete-reason "(progn")))
+  (is (eq :backslash (sbsh::incomplete-reason "echo hi \\")))
+  (is (eq :operator  (sbsh::incomplete-reason "echo hi |")))
+  (is (eq :operator  (sbsh::incomplete-reason "a &&")))
+  (is (eq :operator  (sbsh::incomplete-reason "a ||")))
+  ;; quotes/parens inside a comment do not count as open
+  (is (null (sbsh::incomplete-reason "echo hi # a ' ( quote"))))
+
+(test logical-line-assembly
+  (flet ((feed (lines)
+           (let ((rest (rest lines)))
+             (sbsh::assemble-logical-line
+              (first lines)
+              (lambda (reason) (declare (ignore reason))
+                (if rest (pop rest) :eof))))))
+    (is (string= "echo one two"
+                 (feed '("echo one \\" "two"))))            ; backslash joins directly
+    (is (string= (format nil "echo 'a~%b'")
+                 (feed '("echo 'a" "b'"))))                 ; quote joins with newline
+    (is (string= (format nil "(progn~%(+ 1 2))")
+                 (feed '("(progn" "(+ 1 2))"))))            ; paren joins with newline
+    (is (string= (format nil "echo a |~%tr a-z A-Z")
+                 (feed '("echo a |" "tr a-z A-Z"))))))      ; operator joins with newline
+
+(test multiline-parses-and-runs
+  ;; A joined multi-line pipeline parses to a single 2-stage pipeline.
+  (let* ((clauses (sbsh::parse-line (format nil "echo hi |~%tr a-z A-Z")))
+         (cmds (sbsh::pipeline-commands (sbsh::clause-pipeline (first clauses)))))
+    (is (= 1 (length clauses)))
+    (is (= 2 (length cmds)))
+    (is (equal '("echo" "hi") (sbsh::command-argv (first cmds))))))
+
 (test dup-redirection-not-a-separator
   ;; The & in 2>&1 must not be treated as a background separator.
   (let ((clauses (sbsh::split-clauses "ls 2>&1 | grep x")))

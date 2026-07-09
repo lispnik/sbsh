@@ -217,7 +217,7 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
         (when (>= i n) (return))
         (let ((c (char string i)))
           (cond
-            ((member c '(#\Space #\Tab)) (flush) (incf i))
+            ((member c '(#\Space #\Tab #\Newline #\Return)) (flush) (incf i))
             ((char= c #\')
              (ensure-cur)
              (multiple-value-bind (text ni) (read-single-quoted string (1+ i))

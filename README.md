@@ -38,6 +38,9 @@ HELLO
   globbing (`*`, `?`, `[abc]`, `[a-z]`, `[!…]`). Expansion happens at execution
   time, so `false; echo $?` and `export X=1; echo $X` behave correctly on one
   line.
+- **Multi-line input** — input continues across lines while it is incomplete:
+  an open quote, an unbalanced paren (e.g. a multi-line Lisp form), a trailing
+  `\`, or a dangling `|`/`&&`/`||`, with a `>` continuation prompt.
 - **Builtins** — `cd`, `pwd`, `exit`, `echo`, `export`, `unset`, `env`, `set`,
   `history`, `jobs`, `fg`, `bg`, `kill`, `type`, `help`, `alias`, `unalias`,
   `snapshot`, `true`, `false`, `:`.
@@ -206,8 +209,9 @@ tests/
 
 ## Notes / limitations
 
-- No here-documents `<<`.  Command substitution `$(…)` is supported (shell and
-  Lisp), but not backticks.
+- No here-documents `<<` yet (line continuation and multi-line quotes/parens
+  work; heredocs build on the same continuation-reading primitive).  Command
+  substitution `$(…)` is supported (shell and Lisp), but not backticks.
 - Aliases are word-level (no embedded pipes/operators).
 - `echo` is POSIX-style (supports `-n`, not `-e`).
 - Globbing follows the usual dotfile rule (a leading `.` must be matched

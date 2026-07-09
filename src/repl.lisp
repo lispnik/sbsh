@@ -32,16 +32,35 @@
         (concatenate 'string "~" (subseq cwd (length home)))
         cwd)))
 
-(defun read-command ()
-  "Read one command line, using the interactive editor when on a TTY.
-Returns a string, :EOF, or :CANCEL."
+(defun read-raw-line (prompt)
+  "Read a single physical line with PROMPT (the editor on a TTY, otherwise a
+plain read-line).  Returns a string, :EOF, or :CANCEL."
   (if *interactive*
-      (read-line-interactive (format-prompt))
+      (read-line-interactive prompt)
       (progn
-        (format t "~A" (format-prompt))
+        (format t "~A" prompt)
         (force-output)
-        (let ((line (read-line *standard-input* nil :eof)))
-          line))))
+        (read-line *standard-input* nil :eof))))
+
+(defun continuation-prompt (reason)
+  "Secondary prompt shown while gathering a continued command."
+  (if *interactive*
+      (case reason
+        (:quote "quote> ")
+        (:paren "paren> ")
+        (t "> "))
+      ""))
+
+(defun read-command ()
+  "Read one logical command line, continuing across physical lines while the
+input is incomplete (open quote/paren, trailing backslash, or dangling
+operator).  Returns a string, :EOF, or :CANCEL."
+  (let ((first (read-raw-line (format-prompt))))
+    (if (stringp first)
+        (assemble-logical-line
+         first
+         (lambda (reason) (read-raw-line (continuation-prompt reason))))
+        first)))
 
 (defun run-shell ()
   "Main interactive loop.  Returns the shell's exit code."
