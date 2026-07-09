@@ -1,6 +1,7 @@
 # sbsh
 
 [![CI](https://github.com/lispnik/sbsh/actions/workflows/ci.yml/badge.svg)](https://github.com/lispnik/sbsh/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/lispnik/sbsh?label=release)](https://github.com/lispnik/sbsh/releases/latest)
 
 A Unix shell written in Common Lisp, built on **SBCL**. It leans on SBCL's
 POSIX bindings and foreign-function interface rather than shelling out, giving
