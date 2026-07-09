@@ -41,7 +41,6 @@ jobs:
         include:
           - { os: ubuntu-latest, platform: linux, arch: amd64 }
           - { os: macos-latest,  platform: macos, arch: arm64 }
-          - { os: macos-13,      platform: macos, arch: amd64 }
 
     steps:
       - uses: actions/checkout@v4

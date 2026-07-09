@@ -7,12 +7,12 @@
   :author "burnsidemk@gmail.com"
   :license "MIT"
   :version "0.1.0"
-  :depends-on (#:alexandria
-               (:require #:sb-posix))
+  :depends-on ((:require #:sb-posix))
   :serial t
   :components ((:module "src"
                 :serial t
                 :components ((:file "package")
+                             (:file "util")
                              (:file "conditions")
                              (:file "ffi")
                              (:file "terminal")

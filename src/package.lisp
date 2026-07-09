@@ -2,9 +2,6 @@
 
 (defpackage #:sbsh
   (:use #:cl)
-  (:import-from #:alexandria
-                #:when-let #:if-let #:ensure-list #:starts-with-subseq
-                #:read-file-into-string #:deletef #:removef #:last-elt)
   (:export #:main #:run-shell #:*history*
            ;; --- user-facing API (also usable from ~/.sbshrc) ---
            #:defalias #:unalias #:defcommand #:defprompt #:defcompletion

@@ -131,20 +131,24 @@ you have defined this session) to a standalone executable via
 
 ## Dependencies
 
-Managed with [ocicl](https://github.com/ocicl/ocicl):
+The shell itself depends on **nothing but SBCL** — just `sb-posix` and
+`sb-alien`, which ship with the implementation.  The only external dependency
+is for the test suite, managed with [ocicl](https://github.com/ocicl/ocicl):
 
-- [`alexandria`](https://alexandria.common-lisp.dev/) — utilities
 - [`fiveam`](https://github.com/lispci/fiveam) — test framework (test system only)
 
-Restore them with:
+Restore it with:
 
 ```
 ocicl install
 ```
 
+(Because the core has no external dependencies, `make build` works from a bare
+SBCL checkout — no ocicl required unless you run the tests.)
+
 ## Install
 
-Prebuilt binaries for Linux (amd64) and macOS (arm64 / x86_64) are attached to
+Prebuilt binaries for Linux (amd64) and macOS (arm64) are attached to
 each [release](https://github.com/lispnik/sbsh/releases):
 
 ```
