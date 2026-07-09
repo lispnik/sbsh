@@ -288,18 +288,7 @@ reflect state produced by earlier clauses on the same line."
     (dolist (cl (split-clauses string))
       (let ((term (getf cl :terminator)))
         (when run-next
-          (handler-case
-              (let ((pl (parse-segment (getf cl :text))))
-                (when pl
-                  (when (eq term :amp) (setf (pipeline-background pl) t))
-                  (launch-pipeline pl)))
-            (shell-parse-error (e)
-              (format *error-output* "sbsh: syntax error: ~A~%"
-                      (parse-error-message e))
-              (setf *last-status* 2))
-            (sb-posix:syscall-error (e)
-              (format *error-output* "sbsh: ~A~%" e)
-              (setf *last-status* 1))))
+          (run-clause (getf cl :text) term))
         (setf run-next
               (case term
                 (:and (zerop *last-status*))
@@ -307,27 +296,41 @@ reflect state produced by earlier clauses on the same line."
                 (t t))))))
   *last-status*)
 
-;;; --- Top-level entry with condition handling ----------------------------
+(defun run-clause (text term)
+  "Parse and run one clause.  Errors are confined to this clause so that
+`;`-separated clauses after a failure still run.  An unknown command triggers
+the interactive correction menu (innermost handler) and otherwise fails 127."
+  (handler-case
+      (handler-bind
+          ((command-not-found
+             (lambda (c)
+               (when (and *interactive* (not *capturing*))
+                 (let ((choice (offer-correction c)))
+                   (when choice (invoke-restart 'use-command choice)))))))
+        (let ((pl (parse-segment text)))
+          (when pl
+            (when (eq term :amp) (setf (pipeline-background pl) t))
+            (launch-pipeline pl))))
+    (command-not-found (c)
+      (unless *interactive*
+        (format *error-output* "sbsh: ~A: command not found~%"
+                (command-not-found-name c)))
+      (setf *last-status* 127))
+    (shell-parse-error (e)
+      (format *error-output* "sbsh: syntax error: ~A~%" (parse-error-message e))
+      (setf *last-status* 2))
+    (sb-posix:syscall-error (e)
+      (format *error-output* "sbsh: ~A~%" e)
+      (setf *last-status* 1))))
+
+;;; --- Top-level entry ----------------------------------------------------
 
 (defun execute-line (line)
-  "Execute LINE with the condition handlers appropriate to the context.
-Interactive sessions get a `command-not-found` correction menu; all contexts
-fall back to exit status 127 when a command cannot be found."
+  "Parse and execute a full command line, recording a history entry.  Errors
+are handled per clause in RUN-CLAUSE; this is just a last-resort guard."
   (let ((*line-commands* '()))
     (prog1
-        (handler-case
-            (handler-bind
-                ((command-not-found
-                   (lambda (c)
-                     (when (and *interactive* (not *capturing*))
-                       (let ((choice (offer-correction c)))
-                         (when choice (invoke-restart 'use-command choice)))))))
-              (run-command-line line))
-          (command-not-found (c)
-            (unless *interactive*
-              (format *error-output* "sbsh: ~A: command not found~%"
-                      (command-not-found-name c)))
-            (setf *last-status* 127))
+        (handler-case (run-command-line line)
           (shell-error (c)
             (format *error-output* "sbsh: ~A~%" c)
             (setf *last-status* 1)))

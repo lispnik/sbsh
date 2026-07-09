@@ -224,6 +224,18 @@
                        (sbsh::history-where
                         (lambda (e) (sbsh::command-used-p "echo" e))))))))
 
+(test not-found-does-not-abort-line
+  ;; A command-not-found in one clause must not skip later ;-clauses.
+  (let ((sbsh::*interactive* nil)
+        (sbsh::*history-persist* nil)
+        (sbsh::*last-status* 0)
+        (sbsh::*history-records* (make-array 0 :adjustable t :fill-pointer 0))
+        (*error-output* (make-broadcast-stream)))  ; discard the error text
+    (sbsh::execute-line "nosuchcmd_zzz; true")
+    (is (= 0 sbsh::*last-status*))          ; the `true` after ; still ran
+    (sbsh::execute-line "nosuchcmd_zzz && echo no")
+    (is (= 127 sbsh::*last-status*))))      ; && short-circuited, stayed 127
+
 (test balanced-parens-reader
   (multiple-value-bind (inner after) (sbsh::read-balanced-parens "(a (b) c)xyz" 0)
     (is (string= "a (b) c" inner))
