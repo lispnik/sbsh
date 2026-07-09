@@ -30,10 +30,17 @@
                  '("status" "commit" "checkout" "branch" "log" "diff" "push" "pull")))
 
 ;;; A custom prompt --------------------------------------------------------
+;;; A colored prompt: green user@host, blue current directory, then $.
+;;; (This is the style used to record the demo GIF -- there the username and
+;;;  host were redacted to example@host; here they come from your environment.)
 (defprompt ()
-  (format nil "~A sbsh> "
-          (car (last (pathname-directory
-                      (concatenate 'string (cwd) "/"))))))
+  (let* ((host (machine-instance))
+         (host (subseq host 0 (or (position #\. host) (length host))))
+         (dir  (car (last (pathname-directory
+                           (concatenate 'string (cwd) "/"))))))
+    (format nil "~C[1;32m~A@~A~C[0m:~C[1;34m~A~C[0m$ "
+            #\Escape (or (getenv "USER") "user") host
+            #\Escape #\Escape dir #\Escape)))
 
 ;;; A hook that runs after every cd ----------------------------------------
 (on-cd (lambda (dir)
