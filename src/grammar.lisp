@@ -74,7 +74,7 @@ occurrence of a word in KEYWORDS; NIL if none before the end."
               (declare (ignore be))
               (let* ((then-start (keyword-at text ks "then"))
                      (body-text (subseq text then-start (or bs (length text)))))
-                (run-command-line cond-text)
+                (let ((*condition-context* t)) (run-command-line cond-text))
                 (when (zerop *last-status*)
                   (setf ran t)
                   (run-command-line body-text)
@@ -109,7 +109,7 @@ occurrence of a word in KEYWORDS; NIL if none before the end."
              (*loop-depth* (1+ *loop-depth*)))
         (catch 'sbsh-break
           (loop
-            (run-command-line cond-text)
+            (let ((*condition-context* t)) (run-command-line cond-text))
             (let ((ok (zerop *last-status*)))
               (when until (setf ok (not ok)))
               (unless ok (return)))

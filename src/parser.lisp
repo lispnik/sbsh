@@ -12,7 +12,8 @@
 
 (defstruct pipeline
   (commands '())       ; list of COMMAND
-  (background nil))    ; T if terminated with &
+  (background nil)     ; T if terminated with &
+  (negate nil))        ; T if prefixed with ! (invert exit status)
 
 (defstruct clause
   pipeline
@@ -409,14 +410,21 @@ quotes and parens, so Lisp forms and $(...) are not split)."
 (defun parse-segment (string)
   "Parse a single clause segment (no control operators) into a PIPELINE: a
 function definition, a { } group, or a stage pipeline.  NIL when empty."
-  (multiple-value-bind (fname fbody) (parse-function-def string)
-    (cond
-      (fname
-       (make-pipeline :commands (list (make-command :special (list :defun fname fbody)))))
-      (t (let ((commands (loop for s in (split-pipeline-stages string)
-                               for cmd = (parse-stage s)
-                               when cmd collect cmd)))
-           (and commands (make-pipeline :commands commands)))))))
+  (let ((trimmed (string-left-trim '(#\Space #\Tab #\Newline #\Return) string)))
+    ;; A leading `!` negates the pipeline's exit status.
+    (when (and (>= (length trimmed) 2) (char= (char trimmed 0) #\!)
+               (member (char trimmed 1) '(#\Space #\Tab)))
+      (let ((pl (parse-segment (subseq trimmed 1))))
+        (when pl (setf (pipeline-negate pl) (not (pipeline-negate pl))))
+        (return-from parse-segment pl)))
+    (multiple-value-bind (fname fbody) (parse-function-def trimmed)
+      (cond
+        (fname
+         (make-pipeline :commands (list (make-command :special (list :defun fname fbody)))))
+        (t (let ((commands (loop for s in (split-pipeline-stages trimmed)
+                                 for cmd = (parse-stage s)
+                                 when cmd collect cmd)))
+             (and commands (make-pipeline :commands commands))))))))
 
 (defun terminator->connector (term)
   (case term (:and :and) (:or :or) (t :seq)))

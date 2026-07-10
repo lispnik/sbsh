@@ -399,6 +399,42 @@ two
     (is (search "echo pet" (cdr (first clauses))))
     (is (equal '("*") (car (second clauses))))))
 
+(test shell-test-builtin
+  (is (= 0 (sbsh::shell-test '("nonempty"))))
+  (is (= 1 (sbsh::shell-test '(""))))
+  (is (= 0 (sbsh::shell-test '("-z" ""))))
+  (is (= 1 (sbsh::shell-test '("-n" ""))))
+  (is (= 0 (sbsh::shell-test '("-e" "/etc/hosts"))))
+  (is (= 1 (sbsh::shell-test '("-d" "/etc/hosts"))))
+  (is (= 0 (sbsh::shell-test '("abc" "=" "abc"))))
+  (is (= 1 (sbsh::shell-test '("abc" "=" "xyz"))))
+  (is (= 0 (sbsh::shell-test '("3" "-lt" "5"))))
+  (is (= 1 (sbsh::shell-test '("5" "-lt" "3"))))
+  (is (= 0 (sbsh::shell-test '("!" "-e" "/no/such/path/xyz")))))
+
+(test pipeline-negation-parsing
+  (let ((pl (sbsh::clause-pipeline (first (sbsh::parse-line "! false")))))
+    (is-true (sbsh::pipeline-negate pl))
+    (is (equal '("false")
+               (sbsh::command-argv (first (sbsh::pipeline-commands pl))))))
+  (let ((pl (sbsh::clause-pipeline (first (sbsh::parse-line "true")))))
+    (is-false (sbsh::pipeline-negate pl))))
+
+(test pipestatus-expansion
+  (let ((sbsh::*pipestatus* '(1 0 2)))
+    (is (equal '("1 0 2") (sbsh::expand-words (sbsh::tokenize "$PIPESTATUS"))))
+    (is (equal '("1") (sbsh::expand-words (sbsh::tokenize "${PIPESTATUS[0]}"))))
+    (is (equal '("2") (sbsh::expand-words (sbsh::tokenize "${PIPESTATUS[2]}"))))
+    (is (equal '("") (sbsh::expand-words (sbsh::tokenize "${PIPESTATUS[9]}"))))))
+
+(test assignment-tilde-expansion
+  (let ((home (string-right-trim "/" (namestring (user-homedir-pathname)))))
+    (is (string= (concatenate 'string home "/bin")
+                 (sbsh::expand-assignment-value "~/bin")))
+    (is (string= (concatenate 'string home "/a:" home "/b")
+                 (sbsh::expand-assignment-value "~/a:~/b")))
+    (is (string= "plain" (sbsh::expand-assignment-value "plain")))))
+
 (test balanced-parens-reader
   (multiple-value-bind (inner after) (sbsh::read-balanced-parens "(a (b) c)xyz" 0)
     (is (string= "a (b) c" inner))

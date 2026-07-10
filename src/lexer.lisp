@@ -43,7 +43,26 @@
     ((and (plusp (length name)) (every #'digit-char-p name))
      (let ((idx (parse-integer name)))
        (if (<= 1 idx (length *positional*)) (nth (1- idx) *positional*) "")))
-    (t (or (getenv name) ""))))
+    ((string= name "PIPESTATUS") (format nil "~{~A~^ ~}" *pipestatus*))
+    ((pipestatus-index name))
+    (t (let ((v (getenv name)))
+         (cond
+           (v v)
+           ((and *nounset* (plusp (length name))
+                 (or (alpha-char-p (char name 0)) (char= (char name 0) #\_)))
+            (error 'shell-error :message (format nil "~A: unbound variable" name)))
+           (t ""))))))
+
+(defun pipestatus-index (name)
+  "Return the value of PIPESTATUS[N], or NIL if NAME is not that form."
+  (let ((br (position #\[ name)))
+    (when (and br (plusp (length name)) (char= (char name (1- (length name))) #\])
+               (string= (subseq name 0 br) "PIPESTATUS"))
+      (let ((idx (parse-integer name :start (1+ br) :end (1- (length name))
+                                     :junk-allowed t)))
+        (if (and idx (< -1 idx (length *pipestatus*)))
+            (princ-to-string (nth idx *pipestatus*))
+            "")))))
 
 (defun var-name-char-p (c)
   (or (alphanumericp c) (char= c #\_)))

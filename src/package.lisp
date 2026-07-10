@@ -69,6 +69,19 @@
 (defvar *loop-depth* 0
   "Current nesting depth of for/while/until loops (enables break/continue).")
 
+;;; --- Shell options (set -e / -u / -o pipefail) --------------------------
+
+(defvar *errexit* nil   "set -e: exit on an unhandled command failure.")
+(defvar *nounset* nil   "set -u: expanding an unset variable is an error.")
+(defvar *pipefail* nil  "set -o pipefail: a pipeline fails if any stage fails.")
+
+(defvar *condition-context* nil
+  "True while running a command whose failure is expected (if/while conditions,
+&&/|| operands, negations) -- suppresses errexit.")
+
+(defvar *pipestatus* '(0)
+  "Exit statuses of the stages of the most recent pipeline, in order.")
+
 (defvar *history-records* (make-array 0 :adjustable t :fill-pointer 0)
   "Structured, queryable history: one HIST-ENTRY per executed line.")
 

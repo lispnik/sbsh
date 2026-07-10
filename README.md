@@ -51,7 +51,11 @@ HELLO
 - **Multi-line input** — input continues across lines while it is incomplete:
   an open quote, an unbalanced paren (e.g. a multi-line Lisp form), a trailing
   `\`, or a dangling `|`/`&&`/`||`, with a `>` continuation prompt.
+- **Shell options** — `set -e` (errexit), `set -u` (nounset),
+  `set -o pipefail`, `set -- args`; `!` pipeline negation; `$PIPESTATUS`
+  (and `${PIPESTATUS[n]}`).
 - **Builtins** — `cd`, `pwd`, `exit`, `echo`, `export`, `unset`, `env`, `set`,
+  `read`, `shift`, `wait`, `test`/`[`, `return`, `local`, `break`, `continue`,
   `history`, `jobs`, `fg`, `bg`, `kill`, `type`, `help`, `alias`, `unalias`,
   `snapshot`, `true`, `false`, `:`.
 

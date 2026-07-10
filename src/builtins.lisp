@@ -95,7 +95,8 @@ Names containing a slash are returned as-is if they exist."
         (dolist (a args)
           (let ((eq (position #\= a)))
             (when eq
-              (sb-posix:setenv (subseq a 0 eq) (subseq a (1+ eq)) 1))))
+              (sb-posix:setenv (subseq a 0 eq)
+                               (expand-assignment-value (subseq a (1+ eq))) 1))))
         0)))
 
 (define-builtin "unset" (args)
@@ -109,10 +110,40 @@ Names containing a slash are returned as-is if they exist."
   (dolist (kv (sb-ext:posix-environ)) (format t "~A~%" kv))
   0)
 
+(defun set-o-option (name on)
+  (cond
+    ((string= name "pipefail") (setf *pipefail* on))
+    ((string= name "errexit") (setf *errexit* on))
+    ((string= name "nounset") (setf *nounset* on))
+    (t (format *error-output* "set: ~A: invalid option name~%" name))))
+
+(defun print-set-options ()
+  (format t "pipefail~vT~A~%" 12 (if *pipefail* "on" "off"))
+  (format t "errexit~vT~A~%"  12 (if *errexit* "on" "off"))
+  (format t "nounset~vT~A~%"  12 (if *nounset* "on" "off")))
+
 (define-builtin "set" (args)
-  (dolist (kv (sort (copy-list (sb-ext:posix-environ)) #'string<))
-    (format t "~A~%" kv))
-  0)
+  (cond
+    ((null args)
+     (dolist (kv (sort (copy-list (sb-ext:posix-environ)) #'string<))
+       (format t "~A~%" kv))
+     0)
+    (t
+     (loop while args do
+       (let ((tok (pop args)))
+         (cond
+           ((string= tok "--") (setf *positional* (copy-list args)) (setf args nil))
+           ((or (string= tok "-o") (string= tok "+o"))
+            (if args (set-o-option (pop args) (string= tok "-o")) (print-set-options)))
+           ((and (plusp (length tok)) (member (char tok 0) '(#\- #\+)))
+            (let ((on (char= (char tok 0) #\-)))
+              (loop for c across (subseq tok 1) do
+                (case c
+                  (#\e (setf *errexit* on))
+                  (#\u (setf *nounset* on))
+                  (#\x nil)))))       ; xtrace: accepted, not implemented
+           (t (setf *positional* (cons tok args)) (setf args nil)))))
+     0)))
 
 (define-builtin "history" (args)
   (cond
@@ -217,6 +248,113 @@ Names containing a slash are returned as-is if they exist."
 (define-builtin "true" (args) 0)
 (define-builtin ":" (args) 0)
 (define-builtin "false" (args) 1)
+
+(define-builtin "shift" (args)
+  (let ((n (if args (or (parse-integer (first args) :junk-allowed t) 1) 1)))
+    (if (<= n (length *positional*))
+        (progn (setf *positional* (nthcdr n *positional*)) 0)
+        1)))
+
+(defun assign-read-vars (vars line)
+  "Split LINE on whitespace across VARS; the last var receives the remainder."
+  (let ((line (string-left-trim '(#\Space #\Tab) line))
+        (n (length vars)))
+    (loop for i from 0 for var in vars do
+      (if (= i (1- n))
+          (sb-posix:setenv var (string-right-trim '(#\Space #\Tab) line) 1)
+          (let ((sp (position-if (lambda (c) (member c '(#\Space #\Tab))) line)))
+            (if sp
+                (progn (sb-posix:setenv var (subseq line 0 sp) 1)
+                       (setf line (string-left-trim '(#\Space #\Tab) (subseq line sp))))
+                (progn (sb-posix:setenv var line 1) (setf line ""))))))))
+
+(define-builtin "read" (args)
+  "read [-r] [VAR...] -- read a line of stdin into variables (REPLY by default)."
+  (when (and args (string= (first args) "-r")) (setf args (rest args)))
+  (let ((line (read-line (tty-in) nil nil)))
+    (if (null line)
+        1                               ; EOF
+        (progn (assign-read-vars (or args (list "REPLY")) line) 0))))
+
+(define-builtin "wait" (args)
+  "Block until all child processes have finished."
+  (declare (ignore args))
+  (handler-case
+      (loop (multiple-value-bind (pid status) (sb-posix:waitpid -1 0)
+              (if (or (null pid) (<= pid 0))
+                  (return)
+                  (mark-process-status pid status))))
+    (sb-posix:syscall-error () nil))    ; ECHILD: nothing left to wait for
+  (setf *jobs* (remove-if #'job-completed-p *jobs*))
+  0)
+
+;;; --- test / [ -----------------------------------------------------------
+
+(defun stat-mode (path) (ignore-errors (sb-posix:stat-mode (sb-posix:stat path))))
+(defun test-regular-p (path)
+  (let ((m (stat-mode path))) (and m (= (logand m #o170000) #o100000))))
+(defun test-dir-p (path)
+  (let ((m (stat-mode path))) (and m (= (logand m #o170000) #o040000))))
+(defun test-nonempty-p (path)
+  (let ((s (ignore-errors (sb-posix:stat path))))
+    (and s (plusp (sb-posix:stat-size s)))))
+
+(defun test-int (a op b cmp)
+  (let ((x (parse-integer a :junk-allowed t))
+        (y (parse-integer b :junk-allowed t)))
+    (if (and x y)
+        (if (funcall cmp x y) 0 1)
+        (progn (format *error-output* "[: integer expression expected~%") 2))))
+
+(defun test-binary-op-p (op)
+  (member op '("=" "==" "!=" "-eq" "-ne" "-lt" "-le" "-gt" "-ge") :test #'string=))
+
+(defun test-binary (a op b)
+  (cond
+    ((member op '("=" "==") :test #'string=) (if (string= a b) 0 1))
+    ((string= op "!=") (if (string/= a b) 0 1))
+    ((string= op "-eq") (test-int a op b #'=))
+    ((string= op "-ne") (test-int a op b #'/=))
+    ((string= op "-lt") (test-int a op b #'<))
+    ((string= op "-le") (test-int a op b #'<=))
+    ((string= op "-gt") (test-int a op b #'>))
+    ((string= op "-ge") (test-int a op b #'>=))
+    (t (format *error-output* "[: ~A: unknown operator~%" op) 2)))
+
+(defun test-unary (op a)
+  (flet ((b (x) (if x 0 1)))
+    (cond
+      ((string= op "-z") (b (zerop (length a))))
+      ((string= op "-n") (b (plusp (length a))))
+      ((string= op "-e") (b (file-exists-p a)))
+      ((string= op "-f") (b (test-regular-p a)))
+      ((string= op "-d") (b (test-dir-p a)))
+      ((string= op "-s") (b (test-nonempty-p a)))
+      ((member op '("-r" "-w" "-x") :test #'string=) (b (file-exists-p a)))
+      (t (format *error-output* "[: ~A: unary operator expected~%" op) 2))))
+
+(defun shell-test (args)
+  (case (length args)
+    (0 1)
+    (1 (if (plusp (length (first args))) 0 1))
+    (2 (if (string= (first args) "!")
+           (if (zerop (shell-test (rest args))) 1 0)
+           (test-unary (first args) (second args))))
+    (3 (cond
+         ((test-binary-op-p (second args))
+          (test-binary (first args) (second args) (third args)))
+         ((string= (first args) "!") (if (zerop (shell-test (rest args))) 1 0))
+         (t (format *error-output* "[: ~A: unknown operator~%" (second args)) 2)))
+    (t (if (string= (first args) "!")
+           (if (zerop (shell-test (rest args))) 1 0)
+           (progn (format *error-output* "[: too many arguments~%") 2)))))
+
+(define-builtin "test" (args) (shell-test args))
+
+(define-builtin "[" (args)
+  (if (and args (string= (car (last args)) "]"))
+      (shell-test (butlast args))
+      (progn (format *error-output* "[: missing `]'~%") 2)))
 
 (define-builtin "alias" (args)
   (cond

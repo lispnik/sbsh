@@ -233,9 +233,20 @@ the child.  argv is built before the fork so the child does no allocation."
                       always (let ((c (char s i)))
                                (or (alphanumericp c) (char= c #\_)))))))))
 
+(defun expand-assignment-value (v)
+  "Expand a leading ~ in each :-separated segment of an assignment value
+(so PATH=~/bin:~/x and x=~/foo work)."
+  (with-output-to-string (out)
+    (loop for seg in (split-on-char v #\:)
+          for first = t then nil
+          do (unless first (write-char #\: out))
+             (write-string (if (and (plusp (length seg)) (char= (char seg 0) #\~))
+                               (expand-tilde seg) seg)
+                           out))))
+
 (defun apply-assignment (s)
   (let ((eq (position #\= s)))
-    (sb-posix:setenv (subseq s 0 eq) (subseq s (1+ eq)) 1)))
+    (sb-posix:setenv (subseq s 0 eq) (expand-assignment-value (subseq s (1+ eq))) 1)))
 
 (defun strip-leading-assignments (cmd)
   "Move any leading NAME=VALUE words of CMD into the environment, updating the
@@ -281,6 +292,18 @@ command's ARGV to the remaining words.  Returns nothing."
       (dolist (r *function-local-restores*) (ignore-errors (funcall r))))))
 
 (defun launch-pipeline (pipeline)
+  "Run PIPELINE, then apply $PIPESTATUS, pipefail, and ! negation."
+  (setf *pipestatus* nil)
+  (%launch-pipeline pipeline)
+  (unless *pipestatus* (setf *pipestatus* (list *last-status*)))
+  (when *pipefail*
+    (setf *last-status*
+          (or (find-if (lambda (s) (not (eql s 0))) (reverse *pipestatus*)) 0)))
+  (when (pipeline-negate pipeline)
+    (setf *last-status* (if (zerop *last-status*) 1 0)))
+  *last-status*)
+
+(defun %launch-pipeline (pipeline)
   "Fork the commands of PIPELINE into a process group and run it."
   (mapc #'realize-command (pipeline-commands pipeline))
   (dolist (c (pipeline-commands pipeline))
@@ -291,20 +314,20 @@ command's ARGV to the remaining words.  Returns nothing."
     (when (and (= (length cmds) 1) (not (pipeline-background pipeline)))
       (let* ((cmd (first cmds)))
         (when (command-special cmd)
-          (return-from launch-pipeline (run-special (command-special cmd))))
+          (return-from %launch-pipeline (run-special (command-special cmd))))
         (when (command-lisp cmd)
-          (return-from launch-pipeline (run-lisp-in-process (command-lisp cmd))))
+          (return-from %launch-pipeline (run-lisp-in-process (command-lisp cmd))))
         (strip-leading-assignments cmd)
         (let ((fn (and (command-argv cmd) (shell-function (first (command-argv cmd))))))
           (when fn
-            (return-from launch-pipeline
+            (return-from %launch-pipeline
               (setf *last-status*
                     (call-shell-function fn (rest (command-argv cmd)))))))))
     ;; Leading VAR=value assignments on the first command set the environment.
     (when (and (first cmds) (not (command-special (first cmds))))
       (strip-leading-assignments (first cmds))))
   (when (standalone-builtin-p pipeline)
-    (return-from launch-pipeline (run-standalone-builtin pipeline)))
+    (return-from %launch-pipeline (run-standalone-builtin pipeline)))
   (preflight-commands pipeline)
   (let* ((cmds (pipeline-commands pipeline))
          (bg (pipeline-background pipeline))
@@ -337,7 +360,9 @@ command's ARGV to the remaining words.  Returns nothing."
         (progn
           (format t "[~D] ~D~%" (job-id job) pgid)
           (setf *last-status* 0))
-        (put-job-foreground job nil))
+        (progn
+          (put-job-foreground job nil)
+          (setf *pipestatus* (mapcar #'proc-exit-code (job-procs job)))))
     *last-status*))
 
 ;;; --- And-or list evaluation ---------------------------------------------
@@ -346,16 +371,25 @@ command's ARGV to the remaining words.  Returns nothing."
   "Parse and execute a full command line, honoring && || ; & connectors.
 Each clause is tokenized/parsed lazily, right before it runs, so expansions
 reflect state produced by earlier clauses on the same line."
-  (let ((run-next t))
-    (dolist (cl (split-clauses string))
-      (let ((term (getf cl :terminator)))
-        (when run-next
-          (run-clause (getf cl :text) term))
-        (setf run-next
-              (case term
-                (:and (zerop *last-status*))
-                (:or (not (zerop *last-status*)))
-                (t t))))))
+  (let ((run-next t) (clauses (split-clauses string)))
+    (loop for (cl . rest) on clauses
+          for term = (getf cl :terminator)
+          ;; A clause that feeds a && / || (or is a && / || operand) is a
+          ;; condition: its failure is expected, so errexit is suppressed.
+          for cond-p = (or *condition-context* (member term '(:and :or)))
+          do (when run-next
+               (let ((*condition-context* cond-p))
+                 (run-clause (getf cl :text) term)))
+             ;; errexit: exit if a plain statement failed.
+             (when (and *errexit* run-next (not cond-p) (not *should-exit*)
+                        (not (zerop *last-status*)))
+               (setf *should-exit* *last-status*))
+             (setf run-next
+                   (case term
+                     (:and (zerop *last-status*))
+                     (:or (not (zerop *last-status*)))
+                     (t t)))
+             (when *should-exit* (return))))
   *last-status*)
 
 (defun run-clause (text term)
@@ -382,6 +416,9 @@ the interactive correction menu (innermost handler) and otherwise fails 127."
       (format *error-output* "sbsh: syntax error: ~A~%" (parse-error-message e))
       (setf *last-status* 2))
     (sb-posix:syscall-error (e)
+      (format *error-output* "sbsh: ~A~%" e)
+      (setf *last-status* 1))
+    (shell-error (e)
       (format *error-output* "sbsh: ~A~%" e)
       (setf *last-status* 1))))
 
