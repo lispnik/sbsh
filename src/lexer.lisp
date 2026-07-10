@@ -37,8 +37,7 @@
     ((string= name "?") (princ-to-string *last-status*))
     ((string= name "$") (princ-to-string (sb-posix:getpid)))
     ((string= name "#") (princ-to-string (length *positional*)))
-    ((or (string= name "@") (string= name "*"))
-     (format nil "~{~A~^ ~}" *positional*))
+    ((or (string= name "@") (string= name "*")) (star-join *positional*))
     ((string= name "0") (or (getenv "0") "sbsh"))
     ((and (plusp (length name)) (every #'digit-char-p name))
      (let ((idx (parse-integer name)))
@@ -66,6 +65,13 @@
 
 (defun var-name-char-p (c)
   (or (alphanumericp c) (char= c #\_)))
+
+(defun star-join (list)
+  "Join LIST with the first character of $IFS (a space by default), for $*."
+  (let ((sep (let ((ifs (ifs-value))) (if (plusp (length ifs)) (string (char ifs 0)) ""))))
+    (with-output-to-string (out)
+      (loop for x in list for first = t then nil
+            do (unless first (write-string sep out)) (write-string x out)))))
 
 (defun strip-affix (val pat suffix longest)
   "Remove a prefix (SUFFIX nil) or suffix (SUFFIX t) of VAL matching glob PAT,
@@ -321,6 +327,15 @@ where INNER-TEXT excludes the outer parens.  Tracks nesting and quotes."
                     (values (subseq string start j) (1+ j)))))))
     (error 'shell-parse-error :message "unterminated $( ")))
 
+(defun find-matching-brace (string i)
+  "STRING[i] is `{`; return the index of the matching `}` (nesting-aware, so
+${x:-${HOME}} works), or NIL."
+  (let ((depth 0) (n (length string)))
+    (loop for j from i below n
+          for c = (char string j)
+          do (cond ((char= c #\{) (incf depth))
+                   ((char= c #\}) (decf depth) (when (zerop depth) (return j)))))))
+
 (defun read-variable (string i)
   "Read a $NAME, ${NAME}, or $(...) reference starting after the $ at I.
 Returns (values VALUE INDEX-AFTER)."
@@ -331,7 +346,7 @@ Returns (values VALUE INDEX-AFTER)."
        (multiple-value-bind (body end) (read-balanced-parens string i)
          (values (command-substitute body) end)))
       ((char= (char string i) #\{)
-       (let ((end (position #\} string :start i)))
+       (let ((end (find-matching-brace string i)))
          (unless end (error 'shell-parse-error :message "unterminated ${"))
          (values (braced-var-value (subseq string (1+ i) end)) (1+ end))))
       ;; $? $$ $# $@ $* and single-digit positionals $1..$9
@@ -410,7 +425,7 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
                   (char= (char string (+ i 3)) #\"))
              (flush)
              (if (char= (char string (+ i 2)) #\*)
-                 (push (make-word (format nil "~{~A~^ ~}" *positional*) t) tokens)
+                 (push (make-word (star-join *positional*) t) tokens)
                  (dolist (p *positional*) (push (make-word p t) tokens)))
              (incf i 4))
             ((char= c #\')
@@ -425,10 +440,11 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
              (ensure-cur)
              (when (< (1+ i) n) (write-char (char string (1+ i)) cur) (setf quoted t))
              (incf i 2))
-            ;; Unquoted $@ / $* -> each positional as a separate word.
+            ;; Unquoted $@ / $* -> each positional, word-split on IFS.
             ((and (char= c #\$) (< (1+ i) n) (member (char string (1+ i)) '(#\@ #\*)))
              (flush)
-             (dolist (p *positional*) (push (make-word p) tokens))
+             (dolist (p *positional*)
+               (dolist (f (ifs-split p)) (push (make-word f) tokens)))
              (incf i 2))
             ((char= c #\$)
              (ensure-cur)

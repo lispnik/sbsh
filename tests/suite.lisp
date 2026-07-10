@@ -475,6 +475,34 @@ two
     (is (string= "cd" (e "${SBSH_AB:2:2}"))))          ; substring off+len
   (sb-posix:unsetenv "SBSH_SO") (sb-posix:unsetenv "SBSH_R"))
 
+(test nested-brace-expansion
+  (is (= 7 (sbsh::find-matching-brace "{a:-{b}}xyz" 0)))    ; matches the outer }
+  (sb-posix:setenv "SBSH_NB" "" 1)
+  (sb-posix:setenv "SBSH_NB2" "deep" 1)
+  ;; nested ${...:-${...}} resolves the inner default
+  (is (equal '("deep")
+             (sbsh::expand-words (sbsh::tokenize "${SBSH_NB:-${SBSH_NB2}}"))))
+  (sb-posix:unsetenv "SBSH_NB") (sb-posix:unsetenv "SBSH_NB2"))
+
+(test star-join-uses-ifs
+  (let ((sbsh::*positional* '("a" "b" "c")))
+    (sb-posix:unsetenv "IFS")
+    (is (string= "a b c" (sbsh::star-join sbsh::*positional*)))  ; default: space
+    (sb-posix:setenv "IFS" ",:" 1)
+    (is (string= "a,b,c" (sbsh::star-join sbsh::*positional*))))  ; first IFS char
+  (sb-posix:unsetenv "IFS"))
+
+(test read-field-assignment
+  (sb-posix:unsetenv "IFS")
+  ;; one var gets the whole line (trimmed ends, internal whitespace preserved)
+  (sbsh::assign-read-vars '("RV") "  hi  there  ")
+  (is (string= "hi  there" (sbsh::getenv "RV")))
+  ;; two vars: first field, then unsplit remainder
+  (sbsh::assign-read-vars '("RA" "RB") "  a   b   c  ")
+  (is (string= "a" (sbsh::getenv "RA")))
+  (is (string= "b   c" (sbsh::getenv "RB")))
+  (dolist (v '("RV" "RA" "RB")) (sb-posix:unsetenv v)))
+
 (test namestring-unescaping
   ;; SBCL escapes glob metacharacters in namestrings; we undo that so a real
   ;; file named c*d globs back to itself.

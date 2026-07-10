@@ -282,26 +282,40 @@ Names containing a slash are returned as-is if they exist."
         1)))
 
 (defun assign-read-vars (vars line)
-  "Split LINE into IFS fields across VARS; the last var gets any remainder."
-  (let* ((ifs (ifs-value))
-         (fields (ifs-split line ifs))
-         (n (length vars))
-         (join (let ((nw (find-if-not (lambda (c) (member c '(#\Space #\Tab #\Newline))) ifs)))
-                 (if nw (string nw) " "))))
-    (loop for i from 0 for var in vars do
-      (cond
-        ((= i (1- n))
-         (sb-posix:setenv var (format nil (format nil "~~{~~A~~^~A~~}" join)
-                                      (nthcdr i fields)) 1))
-        (t (sb-posix:setenv var (or (nth i fields) "") 1))))))
+  "Assign LINE to VARS per IFS: the first VARS get one field each; the last var
+gets the unsplit remainder (internal whitespace preserved, ends trimmed)."
+  (let* ((ifs (ifs-value)) (n (length vars)) (len (length line)) (i 0))
+    (when (zerop (length ifs))          ; empty IFS: no splitting at all
+      (sb-posix:setenv (first vars) line 1)
+      (dolist (v (rest vars)) (sb-posix:setenv v "" 1))
+      (return-from assign-read-vars))
+    (labels ((ws-p (c) (and (member c '(#\Space #\Tab #\Newline)) (find c ifs)))
+             (delim-p (c) (find c ifs))
+             (nonws-p (c) (and (not (member c '(#\Space #\Tab #\Newline))) (find c ifs))))
+      (loop while (and (< i len) (ws-p (char line i))) do (incf i))   ; trim leading
+      (loop for vi from 0 for v in vars do
+        (cond
+          ((= vi (1- n))
+           ;; last var: the remainder with trailing IFS characters trimmed
+           (let ((end len))
+             (loop while (and (> end i) (delim-p (char line (1- end)))) do (decf end))
+             (sb-posix:setenv v (subseq line i (max i end)) 1)))
+          (t (let ((start i))
+               (loop while (and (< i len) (not (delim-p (char line i)))) do (incf i))
+               (sb-posix:setenv v (subseq line start i) 1)
+               (if (and (< i len) (nonws-p (char line i)))
+                   (progn (incf i) (loop while (and (< i len) (ws-p (char line i))) do (incf i)))
+                   (loop while (and (< i len) (ws-p (char line i))) do (incf i))))))))))
 
 (define-builtin "read" (args)
-  "read [-r] [VAR...] -- read a line of stdin into variables (REPLY by default)."
+  "read [-r] [VAR...] -- read a line of stdin into variables (REPLY by default).
+Returns 1 at end of input (a final line with no newline still assigns)."
   (when (and args (string= (first args) "-r")) (setf args (rest args)))
-  (let ((line (read-line (tty-in) nil nil)))
+  (multiple-value-bind (line missing-newline) (read-line (tty-in) nil nil)
     (if (null line)
-        1                               ; EOF
-        (progn (assign-read-vars (or args (list "REPLY")) line) 0))))
+        1                               ; end of input, nothing read
+        (progn (assign-read-vars (or args (list "REPLY")) line)
+               (if missing-newline 1 0)))))
 
 (define-builtin "wait" (args)
   "Block until all child processes have finished."
