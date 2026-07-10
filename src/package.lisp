@@ -86,6 +86,10 @@
   "Exit status of the last shell command substitution while realizing a
 command, so `x=$(false)` sets $? to 1.")
 
+(defvar *assignment-restores* '()
+  "Thunks that undo temporary VAR=val prefix assignments (LANG=C sort) after
+the command they prefixed has run.")
+
 (defvar *history-records* (make-array 0 :adjustable t :fill-pointer 0)
   "Structured, queryable history: one HIST-ENTRY per executed line.")
 

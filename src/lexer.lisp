@@ -216,6 +216,18 @@ Returns (values MATCHED-P INDEX-AFTER-CLASS)."
               (incf i))))
       (values (if negate (not matched) matched) (1+ i)))))
 
+(defun unescape-namestring (s)
+  "Remove the backslash escapes SBCL adds before pathname metacharacters
+(* ? [ \\) so a real filename like `c*d` reads back as itself."
+  (if (find #\\ s)
+      (with-output-to-string (out)
+        (let ((i 0) (n (length s)))
+          (loop while (< i n) do
+            (if (and (char= (char s i) #\\) (< (1+ i) n))
+                (progn (write-char (char s (1+ i)) out) (incf i 2))
+                (progn (write-char (char s i) out) (incf i))))))
+      s))
+
 (defun list-dir-entries (dir)
   "Return a list of (NAME . DIRECTORY-P) for the entries of DIR (\"\" = cwd)."
   (let ((path (if (string= dir "")
@@ -224,7 +236,7 @@ Returns (values MATCHED-P INDEX-AFTER-CLASS)."
                                 dir (concatenate 'string dir "/")))))
         (entries '()))
     (dolist (f (ignore-errors (uiop:directory-files path)))
-      (let ((n (file-namestring f)))
+      (let ((n (unescape-namestring (file-namestring f))))
         (when (plusp (length n)) (push (cons n nil) entries))))
     (dolist (d (ignore-errors (uiop:subdirectories path)))
       (let ((n (car (last (pathname-directory d)))))

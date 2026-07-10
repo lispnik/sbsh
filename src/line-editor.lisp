@@ -178,7 +178,7 @@ character / :eof."
     (when dirpath
       (let (names)
         (dolist (p (ignore-errors (uiop:directory-files dirpath)))
-          (let ((n (file-namestring p)))
+          (let ((n (unescape-namestring (file-namestring p))))
             (when (and (plusp (length n)) (starts-with-subseq base n))
               (push n names))))
         (dolist (p (ignore-errors (uiop:subdirectories dirpath)))

@@ -475,6 +475,24 @@ two
     (is (string= "cd" (e "${SBSH_AB:2:2}"))))          ; substring off+len
   (sb-posix:unsetenv "SBSH_SO") (sb-posix:unsetenv "SBSH_R"))
 
+(test namestring-unescaping
+  ;; SBCL escapes glob metacharacters in namestrings; we undo that so a real
+  ;; file named c*d globs back to itself.
+  (is (string= "c*d" (sbsh::unescape-namestring "c\\*d")))
+  (is (string= "a?b" (sbsh::unescape-namestring "a\\?b")))
+  (is (string= "plain.txt" (sbsh::unescape-namestring "plain.txt")))
+  (is (string= "a b" (sbsh::unescape-namestring "a b"))))
+
+(test prefix-assignment-scope
+  ;; VAR=val cmd sets VAR only for that command; a bare VAR=val persists.
+  (sb-posix:unsetenv "SBSH_PA")
+  (let ((*error-output* (make-broadcast-stream)))
+    (sbsh::execute-line "SBSH_PA=temp true"))
+  (is (null (sbsh::getenv "SBSH_PA")))          ; not persisted
+  (sbsh::execute-line "SBSH_PA=perm")
+  (is (string= "perm" (sbsh::getenv "SBSH_PA")))  ; bare assignment persists
+  (sb-posix:unsetenv "SBSH_PA"))
+
 (test path-normalization
   (is (string= "/a/b/c" (sbsh::normalize-path "/a/b/c")))
   (is (string= "/a/c" (sbsh::normalize-path "/a/b/../c")))

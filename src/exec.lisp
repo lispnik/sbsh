@@ -253,13 +253,24 @@ the child.  argv is built before the fork so the child does no allocation."
     (sb-posix:setenv (subseq s 0 eq) (expand-assignment-value (subseq s (1+ eq))) 1)))
 
 (defun strip-leading-assignments (cmd)
-  "Move any leading NAME=VALUE words of CMD into the environment, updating the
-command's ARGV to the remaining words.  Returns nothing."
+  "Move any leading NAME=VALUE words of CMD into the environment.  A pure
+assignment (no command follows) is permanent; a prefix assignment (VAR=val cmd)
+is applied only for that command and undone afterwards via *ASSIGNMENT-RESTORES*."
   (let* ((argv (command-argv cmd))
          (i (loop for a in argv while (assignment-word-p a) count t)))
     (when (plusp i)
-      (dolist (a (subseq argv 0 i)) (apply-assignment a))
-      (setf (command-argv cmd) (subseq argv i)))))
+      (let ((assigns (subseq argv 0 i))
+            (rest (subseq argv i)))
+        (setf (command-argv cmd) rest)
+        (if (null rest)
+            (dolist (a assigns) (apply-assignment a))     ; permanent
+            (dolist (a assigns)                           ; temporary
+              (let* ((eq (position #\= a)) (name (subseq a 0 eq)) (old (getenv name)))
+                (push (if old
+                          (lambda () (sb-posix:setenv name old 1))
+                          (lambda () (env-unset name)))
+                      *assignment-restores*)
+                (apply-assignment a))))))))
 
 ;;; --- Shell functions and { } groups -------------------------------------
 
@@ -298,7 +309,10 @@ command's ARGV to the remaining words.  Returns nothing."
 (defun launch-pipeline (pipeline)
   "Run PIPELINE, then apply $PIPESTATUS, pipefail, and ! negation."
   (setf *pipestatus* nil)
-  (%launch-pipeline pipeline)
+  (let ((*assignment-restores* '()))
+    (unwind-protect (%launch-pipeline pipeline)
+      ;; Undo any VAR=val prefix assignments (children already inherited them).
+      (dolist (r *assignment-restores*) (ignore-errors (funcall r)))))
   (unless *pipestatus* (setf *pipestatus* (list *last-status*)))
   (when *pipefail*
     (setf *last-status*
