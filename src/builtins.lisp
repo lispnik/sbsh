@@ -333,21 +333,42 @@ Names containing a slash are returned as-is if they exist."
       ((member op '("-r" "-w" "-x") :test #'string=) (b (file-exists-p a)))
       (t (format *error-output* "[: ~A: unary operator expected~%" op) 2))))
 
-(defun shell-test (args)
+(defun split-arg-list (list sep)
+  "Split LIST into sublists at each element equal to SEP."
+  (let ((parts '()) (cur '()))
+    (dolist (x list) (if (string= x sep)
+                         (progn (push (nreverse cur) parts) (setf cur '()))
+                         (push x cur)))
+    (push (nreverse cur) parts)
+    (nreverse parts)))
+
+(defun test-primary (args)
   (case (length args)
     (0 1)
     (1 (if (plusp (length (first args))) 0 1))
     (2 (if (string= (first args) "!")
-           (if (zerop (shell-test (rest args))) 1 0)
+           (if (zerop (test-primary (rest args))) 1 0)
            (test-unary (first args) (second args))))
     (3 (cond
          ((test-binary-op-p (second args))
           (test-binary (first args) (second args) (third args)))
-         ((string= (first args) "!") (if (zerop (shell-test (rest args))) 1 0))
+         ((string= (first args) "!") (if (zerop (test-primary (rest args))) 1 0))
          (t (format *error-output* "[: ~A: unknown operator~%" (second args)) 2)))
     (t (if (string= (first args) "!")
-           (if (zerop (shell-test (rest args))) 1 0)
+           (if (zerop (test-primary (rest args))) 1 0)
            (progn (format *error-output* "[: too many arguments~%") 2)))))
+
+(defun shell-test (args)
+  "Evaluate a test expression, honoring -o (OR) / -a (AND) between primaries."
+  (if (not (or (member "-a" args :test #'string=) (member "-o" args :test #'string=)))
+      (test-primary args)
+      (let ((any nil))
+        (dolist (or-part (split-arg-list args "-o"))
+          (let ((all t))
+            (dolist (and-part (split-arg-list or-part "-a"))
+              (unless (zerop (test-primary and-part)) (setf all nil)))
+            (when all (setf any t))))
+        (if any 0 1))))
 
 (define-builtin "test" (args) (shell-test args))
 

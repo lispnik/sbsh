@@ -67,6 +67,37 @@
 (defun var-name-char-p (c)
   (or (alphanumericp c) (char= c #\_)))
 
+(defun braced-var-value (content)
+  "Value of a ${...} expression, handling ${#var} (length) and the
+${var:-word} / :=/ :+ / :? (and colon-less) default/alternate operators."
+  (cond
+    ((zerop (length content)) "")
+    ((string= content "#") (var-value "#"))
+    ((char= (char content 0) #\#)
+     (princ-to-string (length (var-value (subseq content 1)))))
+    (t (let ((opidx (position-if (lambda (c) (member c '(#\- #\= #\+ #\?))) content)))
+         (if (null opidx)
+             (var-value content)
+             (let* ((colon (and (> opidx 0) (char= (char content (1- opidx)) #\:)))
+                    (name (subseq content 0 (if colon (1- opidx) opidx)))
+                    (op (char content opidx))
+                    (word (subseq content (1+ opidx)))
+                    (raw (getenv name))
+                    (val (var-value name))
+                    (missing (if colon (zerop (length val)) (null raw))))
+               (flet ((w () (expand-heredoc-body word)))
+                 (case op
+                   (#\- (if missing (w) val))
+                   (#\= (if missing (let ((v (w))) (sb-posix:setenv name v 1) v) val))
+                   (#\+ (if missing "" (w)))
+                   (#\? (if missing
+                            (error 'shell-error :message
+                                   (format nil "~A: ~A" name
+                                           (if (plusp (length word)) (w)
+                                               "parameter null or not set")))
+                            val))
+                   (t (var-value content))))))))))
+
 ;;; --- Globbing -----------------------------------------------------------
 
 (defun wildcard-p (s)
@@ -217,7 +248,7 @@ Returns (values VALUE INDEX-AFTER)."
       ((char= (char string i) #\{)
        (let ((end (position #\} string :start i)))
          (unless end (error 'shell-parse-error :message "unterminated ${"))
-         (values (var-value (subseq string (1+ i) end)) (1+ end))))
+         (values (braced-var-value (subseq string (1+ i) end)) (1+ end))))
       ;; $? $$ $# $@ $* and single-digit positionals $1..$9
       ((member (char string i) '(#\? #\$ #\# #\@ #\* #\0 #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9))
        (values (var-value (string (char string i))) (1+ i)))
@@ -272,7 +303,11 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
         (cur nil)               ; string-output-stream for the current word
         (quoted nil))
     (labels ((ensure-cur () (unless cur (setf cur (make-string-output-stream))))
-             (pending () (and cur (get-output-stream-string cur)))
+             ;; Non-destructively read the current word's text so the fd-digit
+             ;; check in < / > does not consume it (echo a>file).
+             (pending () (when cur
+                           (let ((s (get-output-stream-string cur)))
+                             (write-string s cur) s)))
              (flush ()
                (when cur
                  (push (make-word (get-output-stream-string cur) quoted) tokens)
@@ -283,6 +318,16 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
         (let ((c (char string i)))
           (cond
             ((member c '(#\Space #\Tab #\Newline #\Return)) (flush) (incf i))
+            ;; "$@" -> one word per positional param; "$*" -> a single joined word.
+            ((and (char= c #\") (< (+ i 3) n)
+                  (char= (char string (1+ i)) #\$)
+                  (member (char string (+ i 2)) '(#\@ #\*))
+                  (char= (char string (+ i 3)) #\"))
+             (flush)
+             (if (char= (char string (+ i 2)) #\*)
+                 (push (make-word (format nil "~{~A~^ ~}" *positional*) t) tokens)
+                 (dolist (p *positional*) (push (make-word p t) tokens)))
+             (incf i 4))
             ((char= c #\')
              (ensure-cur)
              (multiple-value-bind (text ni) (read-single-quoted string (1+ i))
@@ -295,10 +340,29 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
              (ensure-cur)
              (when (< (1+ i) n) (write-char (char string (1+ i)) cur) (setf quoted t))
              (incf i 2))
+            ;; Unquoted $@ / $* -> each positional as a separate word.
+            ((and (char= c #\$) (< (1+ i) n) (member (char string (1+ i)) '(#\@ #\*)))
+             (flush)
+             (dolist (p *positional*) (push (make-word p) tokens))
+             (incf i 2))
             ((char= c #\$)
              (ensure-cur)
              (multiple-value-bind (val ni) (read-variable string (1+ i))
-               (write-string val cur) (setf i ni)))
+               (setf i ni)
+               ;; Word-split an unquoted expansion on IFS (POSIX), except in an
+               ;; assignment's value (x=$y stays one word).
+               (let ((sofar (get-output-stream-string cur)))
+                 (write-string sofar cur)   ; restore what we consumed to peek
+                 (if (assignment-prefix-p sofar)
+                     (write-string val cur)
+                     (let ((fields (ifs-split val)))
+                       (cond
+                         ((null fields))     ; expanded to nothing
+                         ((and (= (length fields) 1) (string= (first fields) val))
+                          (write-string val cur))
+                         (t (write-string (first fields) cur)
+                            (dolist (f (rest fields))
+                              (flush) (ensure-cur) (write-string f cur)))))))))
             ((char= c #\|)
              (flush)
              (if (eql (peek 1) #\|) (progn (push :or tokens) (incf i 2))
@@ -343,6 +407,29 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
       (flush)
       (nreverse tokens))))
 
+(defun ifs-split (string)
+  "Split STRING on runs of IFS whitespace, trimming leading/trailing.
+Returns a list of fields (empty when STRING is all whitespace or empty)."
+  (let ((fields '()) (i 0) (n (length string)))
+    (flet ((ws (c) (member c '(#\Space #\Tab #\Newline))))
+      (loop
+        (loop while (and (< i n) (ws (char string i))) do (incf i))
+        (when (>= i n) (return))
+        (let ((start i))
+          (loop while (and (< i n) (not (ws (char string i)))) do (incf i))
+          (push (subseq string start i) fields))))
+    (nreverse fields)))
+
+(defun assignment-prefix-p (string)
+  "True if STRING so far looks like NAME= (so an unquoted $ in an assignment's
+value is not word-split)."
+  (let ((eq (position #\= string)))
+    (and eq (> eq 0)
+         (let ((c0 (char string 0)))
+           (and (or (alpha-char-p c0) (char= c0 #\_))
+                (loop for k from 1 below eq
+                      always (var-name-char-p (char string k))))))))
+
 (defun digits-or (default string)
   "If STRING is non-NIL and all digits, return its integer value, else DEFAULT."
   (if (and string (plusp (length string)) (every #'digit-char-p string))
@@ -357,9 +444,12 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
 
 (defun expand-words (words)
   "Apply tilde expansion and globbing to a list of WORD structs, returning a
-flat list of strings.  Quoted words are passed through literally."
+flat list of strings.  Quoted words pass through literally (an empty quoted
+word is kept); an unquoted word that expanded to nothing is dropped."
   (loop for w in words
         for text = (if (word-quoted w) (word-text w) (maybe-tilde (word-text w)))
-        append (if (and (not (word-quoted w)) (wildcard-p text))
-                   (or (glob-expand text) (list text))
-                   (list text))))
+        append (cond
+                 ((word-quoted w) (list text))
+                 ((zerop (length text)) nil)   ; unquoted empty expansion: no word
+                 ((wildcard-p text) (or (glob-expand text) (list text)))
+                 (t (list text)))))

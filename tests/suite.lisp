@@ -323,9 +323,10 @@ two
   (let ((sbsh::*positional* '("a" "b" "c")))
     (is (equal '("a") (sbsh::expand-words (sbsh::tokenize "$1"))))
     (is (equal '("c") (sbsh::expand-words (sbsh::tokenize "$3"))))
-    (is (equal '("")  (sbsh::expand-words (sbsh::tokenize "$9"))))
+    (is (equal '()  (sbsh::expand-words (sbsh::tokenize "$9"))))   ; unset -> no word
     (is (equal '("3") (sbsh::expand-words (sbsh::tokenize "$#"))))
-    (is (equal '("a b c") (word-texts (sbsh::tokenize "\"$@\""))))))
+    ;; "$@" expands to one word per positional parameter
+    (is (equal '("a" "b" "c") (word-texts (sbsh::tokenize "\"$@\""))))))
 
 (test function-def-parsing
   (multiple-value-bind (name body) (sbsh::parse-function-def "foo() { echo hi; }")
@@ -422,10 +423,12 @@ two
 
 (test pipestatus-expansion
   (let ((sbsh::*pipestatus* '(1 0 2)))
-    (is (equal '("1 0 2") (sbsh::expand-words (sbsh::tokenize "$PIPESTATUS"))))
+    ;; unquoted expansion is word-split; quoted keeps it as one word
+    (is (equal '("1" "0" "2") (sbsh::expand-words (sbsh::tokenize "$PIPESTATUS"))))
+    (is (equal '("1 0 2") (sbsh::expand-words (sbsh::tokenize "\"$PIPESTATUS\""))))
     (is (equal '("1") (sbsh::expand-words (sbsh::tokenize "${PIPESTATUS[0]}"))))
     (is (equal '("2") (sbsh::expand-words (sbsh::tokenize "${PIPESTATUS[2]}"))))
-    (is (equal '("") (sbsh::expand-words (sbsh::tokenize "${PIPESTATUS[9]}"))))))
+    (is (equal '() (sbsh::expand-words (sbsh::tokenize "${PIPESTATUS[9]}"))))))
 
 (test assignment-tilde-expansion
   (let ((home (string-right-trim "/" (namestring (user-homedir-pathname)))))
@@ -434,6 +437,33 @@ two
     (is (string= (concatenate 'string home "/a:" home "/b")
                  (sbsh::expand-assignment-value "~/a:~/b")))
     (is (string= "plain" (sbsh::expand-assignment-value "plain")))))
+
+(test word-splitting
+  (sb-posix:setenv "SBSH_WS" "a b c" 1)
+  ;; unquoted expansion splits on IFS; quoted stays one word
+  (is (equal '("a" "b" "c") (sbsh::expand-words (sbsh::tokenize "$SBSH_WS"))))
+  (is (equal '("a b c") (sbsh::expand-words (sbsh::tokenize "\"$SBSH_WS\""))))
+  ;; a prefix joins the first field
+  (sb-posix:setenv "SBSH_WS2" "x y" 1)
+  (is (equal '("px" "y") (sbsh::expand-words (sbsh::tokenize "p$SBSH_WS2"))))
+  ;; assignment RHS is not split
+  (is (equal '("v=x y") (sbsh::expand-words (sbsh::tokenize "v=$SBSH_WS2"))))
+  (sb-posix:unsetenv "SBSH_WS") (sb-posix:unsetenv "SBSH_WS2"))
+
+(test param-expansion-modifiers
+  (sb-posix:unsetenv "SBSH_U")
+  (is (equal '("default") (sbsh::expand-words (sbsh::tokenize "${SBSH_U:-default}"))))
+  (sb-posix:setenv "SBSH_S" "val" 1)
+  (is (equal '("val") (sbsh::expand-words (sbsh::tokenize "${SBSH_S:-default}"))))
+  (is (equal '("yes") (sbsh::expand-words (sbsh::tokenize "${SBSH_S:+yes}"))))
+  (is (equal '("3") (sbsh::expand-words (sbsh::tokenize "${#SBSH_S}"))))  ; length of "val"
+  (sb-posix:unsetenv "SBSH_S"))
+
+(test test-and-or-operators
+  (is (= 0 (sbsh::shell-test '("1" "-eq" "1" "-a" "2" "-eq" "2"))))
+  (is (= 1 (sbsh::shell-test '("1" "-eq" "1" "-a" "2" "-eq" "3"))))
+  (is (= 0 (sbsh::shell-test '("1" "-eq" "9" "-o" "2" "-eq" "2"))))
+  (is (= 1 (sbsh::shell-test '("1" "-eq" "9" "-o" "2" "-eq" "8")))))
 
 (test balanced-parens-reader
   (multiple-value-bind (inner after) (sbsh::read-balanced-parens "(a (b) c)xyz" 0)

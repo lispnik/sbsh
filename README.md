@@ -224,6 +224,9 @@ tests/
 ## Notes / limitations
 
 - Command substitution `$(…)` is supported (shell and Lisp), but not backticks.
+- A here-document whose body lies inside a multi-line compound body
+  (e.g. a `cat <<EOF` inside a `for … done`) is not collected — heredocs work
+  at the top level and in single-line pipelines.
 - Aliases are word-level (no embedded pipes/operators).
 - `echo` is POSIX-style (supports `-n`, not `-e`).
 - Globbing follows the usual dotfile rule (a leading `.` must be matched

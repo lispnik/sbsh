@@ -107,14 +107,18 @@ occurrence of a word in KEYWORDS; NIL if none before the end."
                              (length text)))
              (body-text (subseq text body-start done-start))
              (*loop-depth* (1+ *loop-depth*)))
-        (catch 'sbsh-break
-          (loop
-            (let ((*condition-context* t)) (run-command-line cond-text))
-            (let ((ok (zerop *last-status*)))
-              (when until (setf ok (not ok)))
-              (unless ok (return)))
-            (catch 'sbsh-continue (run-command-line body-text))))
-        *last-status*))))
+        ;; A loop's exit status is that of the last command in its body
+        ;; (0 if the body never runs), not the final (false) condition.
+        (let ((body-status 0))
+          (catch 'sbsh-break
+            (loop
+              (let ((*condition-context* t)) (run-command-line cond-text))
+              (let ((ok (zerop *last-status*)))
+                (when until (setf ok (not ok)))
+                (unless ok (return)))
+              (catch 'sbsh-continue (run-command-line body-text))
+              (setf body-status *last-status*)))
+          (setf *last-status* body-status))))))
 
 ;;; --- for ----------------------------------------------------------------
 
