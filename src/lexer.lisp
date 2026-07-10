@@ -67,36 +67,109 @@
 (defun var-name-char-p (c)
   (or (alphanumericp c) (char= c #\_)))
 
+(defun strip-affix (val pat suffix longest)
+  "Remove a prefix (SUFFIX nil) or suffix (SUFFIX t) of VAL matching glob PAT,
+shortest match unless LONGEST."
+  (let* ((n (length val))
+         (ks (if suffix
+                 (if longest (loop for k from 0 to n collect k)
+                     (loop for k from n downto 0 collect k))
+                 (if longest (loop for k from n downto 0 collect k)
+                     (loop for k from 0 to n collect k)))))
+    (dolist (k ks val)
+      (if suffix
+          (when (fnmatch pat (subseq val k)) (return (subseq val 0 k)))
+          (when (fnmatch pat (subseq val 0 k)) (return (subseq val k)))))))
+
+(defun replace-substr (val pat repl all)
+  "Replace literal PAT in VAL with REPL (first, or ALL)."
+  (if (or (zerop (length pat)) (not (search pat val)))
+      val
+      (with-output-to-string (out)
+        (let ((i 0) (pl (length pat)))
+          (loop
+            (let ((pos (search pat val :start2 i)))
+              (cond
+                ((null pos) (write-string (subseq val i) out) (return))
+                (t (write-string (subseq val i pos) out)
+                   (write-string repl out)
+                   (setf i (+ pos pl))
+                   (unless all (write-string (subseq val i) out) (return))))))))))
+
+(defun substring-of (val spec)
+  "Return the ${var:offset[:length]} substring of VAL; SPEC is the text after
+the colon."
+  (let* ((c (position #\: spec))
+         (off (or (parse-integer (if c (subseq spec 0 c) spec) :junk-allowed t) 0))
+         (len (and c (parse-integer (subseq spec (1+ c)) :junk-allowed t)))
+         (n (length val))
+         (start (min n (max 0 (if (minusp off) (+ n off) off))))
+         (end (if len (min n (max start (+ start len))) n)))
+    (subseq val start end)))
+
+(defun param-name-end (s)
+  "Length of the parameter name at the start of S."
+  (cond
+    ((zerop (length s)) 0)
+    ((member (char s 0) '(#\@ #\* #\? #\$ #\! #\#)) 1)
+    ((digit-char-p (char s 0)) (or (position-if-not #'digit-char-p s) (length s)))
+    (t (or (position-if-not #'var-name-char-p s) (length s)))))
+
 (defun braced-var-value (content)
-  "Value of a ${...} expression, handling ${#var} (length) and the
-${var:-word} / :=/ :+ / :? (and colon-less) default/alternate operators."
+  "Value of a ${...} expression: length, default/alternate (:- := :+ :?),
+prefix/suffix removal (# ## % %%), replacement (/ //), and substrings (:off:len)."
   (cond
     ((zerop (length content)) "")
     ((string= content "#") (var-value "#"))
-    ((char= (char content 0) #\#)
+    ;; ${#name} length (but not ${#} which is above, nor ${#var...ops})
+    ((and (char= (char content 0) #\#) (> (length content) 1)
+          (let ((c1 (char content 1))) (or (var-name-char-p c1) (member c1 '(#\@ #\*)))))
      (princ-to-string (length (var-value (subseq content 1)))))
-    (t (let ((opidx (position-if (lambda (c) (member c '(#\- #\= #\+ #\?))) content)))
-         (if (null opidx)
-             (var-value content)
-             (let* ((colon (and (> opidx 0) (char= (char content (1- opidx)) #\:)))
-                    (name (subseq content 0 (if colon (1- opidx) opidx)))
-                    (op (char content opidx))
-                    (word (subseq content (1+ opidx)))
-                    (raw (getenv name))
-                    (val (var-value name))
-                    (missing (if colon (zerop (length val)) (null raw))))
-               (flet ((w () (expand-heredoc-body word)))
-                 (case op
-                   (#\- (if missing (w) val))
-                   (#\= (if missing (let ((v (w))) (sb-posix:setenv name v 1) v) val))
-                   (#\+ (if missing "" (w)))
-                   (#\? (if missing
-                            (error 'shell-error :message
-                                   (format nil "~A: ~A" name
-                                           (if (plusp (length word)) (w)
-                                               "parameter null or not set")))
-                            val))
-                   (t (var-value content))))))))))
+    (t (let* ((ne (param-name-end content))
+              (name (subseq content 0 ne))
+              (rest (subseq content ne))
+              (val (var-value name)))
+         (if (zerop (length rest))
+             val
+             (let ((c0 (char rest 0)))
+               (flet ((two (c) (and (> (length rest) 1) (char= (char rest 1) c))))
+                 (cond
+                   ;; # / ## remove prefix ; % / %% remove suffix
+                   ((char= c0 #\#) (strip-affix val (subseq rest (if (two #\#) 2 1)) nil (two #\#)))
+                   ((char= c0 #\%) (strip-affix val (subseq rest (if (two #\%) 2 1)) t (two #\%)))
+                   ;; / // replace
+                   ((char= c0 #\/)
+                    (let* ((all (two #\/))
+                           (body (subseq rest (if all 2 1)))
+                           (slash (position #\/ body))
+                           (pat (if slash (subseq body 0 slash) body))
+                           (repl (if slash (expand-heredoc-body (subseq body (1+ slash))) "")))
+                      (replace-substr val pat repl all)))
+                   ;; :offset[:length] substring, or :-/:=/:+/:? defaults
+                   ((char= c0 #\:)
+                    (if (and (> (length rest) 1) (member (char rest 1) '(#\- #\= #\+ #\?)))
+                        (apply-default val name (char rest 1) (subseq rest 2) t)
+                        (substring-of val (subseq rest 1))))
+                   ((member c0 '(#\- #\= #\+ #\?))
+                    (apply-default val name c0 (subseq rest 1) nil))
+                   ;; array subscript like PIPESTATUS[0]
+                   ((char= c0 #\[) (var-value content))
+                   (t val)))))))))
+
+(defun apply-default (val name op word colon)
+  "Handle the ${var OP word} default/alternate operators."
+  (let ((missing (if colon (zerop (length val)) (null (getenv name)))))
+    (flet ((w () (expand-heredoc-body word)))
+      (case op
+        (#\- (if missing (w) val))
+        (#\= (if missing (let ((v (w))) (sb-posix:setenv name v 1) v) val))
+        (#\+ (if missing "" (w)))
+        (#\? (if missing
+                 (error 'shell-error :message
+                        (format nil "~A: ~A" name
+                                (if (plusp (length word)) (w) "parameter null or not set")))
+                 val))
+        (t val)))))
 
 ;;; --- Globbing -----------------------------------------------------------
 
@@ -407,18 +480,33 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
       (flush)
       (nreverse tokens))))
 
-(defun ifs-split (string)
-  "Split STRING on runs of IFS whitespace, trimming leading/trailing.
-Returns a list of fields (empty when STRING is all whitespace or empty)."
-  (let ((fields '()) (i 0) (n (length string)))
-    (flet ((ws (c) (member c '(#\Space #\Tab #\Newline))))
-      (loop
-        (loop while (and (< i n) (ws (char string i))) do (incf i))
-        (when (>= i n) (return))
-        (let ((start i))
-          (loop while (and (< i n) (not (ws (char string i)))) do (incf i))
-          (push (subseq string start i) fields))))
-    (nreverse fields)))
+(defun ifs-value ()
+  (let ((v (getenv "IFS")))
+    (if v v (coerce '(#\Space #\Tab #\Newline) 'string))))
+
+(defun ifs-split (string &optional (ifs (ifs-value)))
+  "Split STRING into fields per IFS.  Runs of IFS whitespace collapse and are
+trimmed at the ends; each non-whitespace IFS character delimits a field (so
+adjacent ones yield empty fields).  Empty IFS means no splitting."
+  (when (zerop (length ifs))
+    (return-from ifs-split (if (zerop (length string)) '() (list string))))
+  (let ((fields '()) (cur '()) (n (length string)) (i 0))
+    (labels ((ws-p (c) (and (member c '(#\Space #\Tab #\Newline)) (find c ifs)))
+             (nonws-p (c) (and (not (member c '(#\Space #\Tab #\Newline))) (find c ifs)))
+             (skip-ws () (loop while (and (< i n) (ws-p (char string i))) do (incf i)))
+             (emit () (push (coerce (nreverse cur) 'string) fields) (setf cur '())))
+      (skip-ws)
+      (loop while (< i n) do
+        (let ((c (char string i)))
+          (cond
+            ((ws-p c) (skip-ws)
+             (when (< i n)
+               (cond ((nonws-p (char string i)) (emit) (incf i) (skip-ws))
+                     (t (emit)))))
+            ((nonws-p c) (emit) (incf i) (skip-ws))
+            (t (push c cur) (incf i)))))
+      (when cur (emit))
+      (nreverse fields))))
 
 (defun assignment-prefix-p (string)
   "True if STRING so far looks like NAME= (so an unquoted $ in an assignment's

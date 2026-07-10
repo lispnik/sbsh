@@ -256,17 +256,18 @@ Names containing a slash are returned as-is if they exist."
         1)))
 
 (defun assign-read-vars (vars line)
-  "Split LINE on whitespace across VARS; the last var receives the remainder."
-  (let ((line (string-left-trim '(#\Space #\Tab) line))
-        (n (length vars)))
+  "Split LINE into IFS fields across VARS; the last var gets any remainder."
+  (let* ((ifs (ifs-value))
+         (fields (ifs-split line ifs))
+         (n (length vars))
+         (join (let ((nw (find-if-not (lambda (c) (member c '(#\Space #\Tab #\Newline))) ifs)))
+                 (if nw (string nw) " "))))
     (loop for i from 0 for var in vars do
-      (if (= i (1- n))
-          (sb-posix:setenv var (string-right-trim '(#\Space #\Tab) line) 1)
-          (let ((sp (position-if (lambda (c) (member c '(#\Space #\Tab))) line)))
-            (if sp
-                (progn (sb-posix:setenv var (subseq line 0 sp) 1)
-                       (setf line (string-left-trim '(#\Space #\Tab) (subseq line sp))))
-                (progn (sb-posix:setenv var line 1) (setf line ""))))))))
+      (cond
+        ((= i (1- n))
+         (sb-posix:setenv var (format nil (format nil "~~{~~A~~^~A~~}" join)
+                                      (nthcdr i fields)) 1))
+        (t (sb-posix:setenv var (or (nth i fields) "") 1))))))
 
 (define-builtin "read" (args)
   "read [-r] [VAR...] -- read a line of stdin into variables (REPLY by default)."

@@ -127,7 +127,7 @@ the child.  argv is built before the fork so the child does no allocation."
             (return-from fork-command pid)
             (progn
               (child-setup pgid infd outfd foreground fds-to-close
-                           (if fn (command-redirs cmd) nil))
+                           (command-redirs cmd))
               (let ((code (if (command-special cmd)
                               (progn (run-special (command-special cmd)) *last-status*)
                               (call-shell-function fn (rest (command-argv cmd))))))
@@ -212,7 +212,11 @@ the child.  argv is built before the fork so the child does no allocation."
 (defun run-standalone-builtin (pipeline)
   (let* ((cmd (first (pipeline-commands pipeline)))
          (argv (command-argv cmd)))
-    (flet ((run () (if argv (run-builtin (first argv) (rest argv)) 0)))
+    (flet ((run () (if argv
+                       (run-builtin (first argv) (rest argv))
+                       ;; A pure assignment (empty argv) takes the status of the
+                       ;; last command substitution in its value, else 0.
+                       (or *cmdsub-status* 0))))
       (setf *last-status*
             (if (command-redirs cmd)
                 (handler-case
@@ -314,7 +318,12 @@ command's ARGV to the remaining words.  Returns nothing."
     (when (and (= (length cmds) 1) (not (pipeline-background pipeline)))
       (let* ((cmd (first cmds)))
         (when (command-special cmd)
-          (return-from %launch-pipeline (run-special (command-special cmd))))
+          (return-from %launch-pipeline
+            (if (command-redirs cmd)
+                (call-with-shell-redirections
+                 (command-redirs cmd)
+                 (lambda () (run-special (command-special cmd))))
+                (run-special (command-special cmd)))))
         (when (command-lisp cmd)
           (return-from %launch-pipeline (run-lisp-in-process (command-lisp cmd))))
         (strip-leading-assignments cmd)
@@ -358,7 +367,8 @@ command's ARGV to the remaining words.  Returns nothing."
     (add-job job)
     (if bg
         (progn
-          (format t "[~D] ~D~%" (job-id job) pgid)
+          (when *interactive*
+            (format *error-output* "[~D] ~D~%" (job-id job) pgid))
           (setf *last-status* 0))
         (progn
           (put-job-foreground job nil)
@@ -396,6 +406,7 @@ reflect state produced by earlier clauses on the same line."
   "Parse and run one clause.  Errors are confined to this clause so that
 `;`-separated clauses after a failure still run.  An unknown command triggers
 the interactive correction menu (innermost handler) and otherwise fails 127."
+  (setf *cmdsub-status* nil)   ; reset before parsing (where $(...) runs)
   (handler-case
       (handler-bind
           ((command-not-found
@@ -591,6 +602,7 @@ with trailing newlines stripped.  Deadlock-free (uses a file, not a pipe)."
             (lambda ()
               (execute-line line)
               (finish-output *standard-output*)))
+           (setf *cmdsub-status* *last-status*)   ; x=$(false) -> $? = 1
            (string-right-trim '(#\Newline #\Return)
                               (if (probe-file tmp)
                                   (read-file-into-string tmp)

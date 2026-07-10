@@ -37,10 +37,13 @@ HELLO
 - **Line editor** — a raw-mode `readline` written from scratch: `C-a`/`C-e`
   (home/end), `C-b`/`C-f` (left/right), `C-k`/`C-u` (kill), `C-w` (kill word),
   `C-l` (clear), arrow keys, Delete, and **Tab filename completion**.
-- **Expansion** — variables (`$VAR`, `${VAR}`, `$?`, `$$`), tilde (`~`), and
-  globbing (`*`, `?`, `[abc]`, `[a-z]`, `[!…]`). Expansion happens at execution
-  time, so `false; echo $?` and `export X=1; echo $X` behave correctly on one
-  line.
+- **Expansion** — variables (`$VAR`, `${VAR}`, `$?`, `$$`, `$@`, `$#`,
+  positional `$1`…); parameter operators `${v:-def}`, `${v:=}`, `${v:+}`,
+  `${#v}`, `${v#pat}`/`${v##pat}`, `${v%pat}`/`${v%%pat}`, `${v/a/b}`/`${v//a/b}`,
+  `${v:off:len}`; tilde (`~`, incl. in assignments); command substitution
+  `$(…)`; and globbing (`*`, `?`, `[abc]`, `[a-z]`, `[!…]`).  Unquoted
+  expansions are **word-split** on `$IFS`; `"$@"` yields one word per parameter.
+  Expansion happens at execution time, so `false; echo $?` behaves correctly.
 - **Control flow** — `if`/`elif`/`else`/`fi`, `while`/`until`/`do`/`done`,
   `for NAME in … / do … done`, `case … in … esac` (with `|` and glob
   patterns), and `break`/`continue`; arbitrarily nested and usable in

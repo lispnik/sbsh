@@ -459,6 +459,31 @@ two
   (is (equal '("3") (sbsh::expand-words (sbsh::tokenize "${#SBSH_S}"))))  ; length of "val"
   (sb-posix:unsetenv "SBSH_S"))
 
+(test string-operations
+  (sb-posix:setenv "SBSH_SO" "foobar.txt" 1)
+  (flet ((e (s) (first (sbsh::expand-words (sbsh::tokenize s)))))
+    (is (string= "bar.txt" (e "${SBSH_SO#foo}")))    ; remove prefix
+    (is (string= "foobar" (e "${SBSH_SO%.txt}")))     ; remove suffix
+    (sb-posix:setenv "SBSH_PATH" "/a/b/c" 1)
+    (is (string= "c" (e "${SBSH_PATH##*/}")))          ; longest prefix
+    (is (string= "/a/b" (e "${SBSH_PATH%/*}")))        ; shortest suffix
+    (sb-posix:setenv "SBSH_R" "aaa" 1)
+    (is (string= "baa" (e "${SBSH_R/a/b}")))           ; replace first
+    (is (string= "bbb" (e "${SBSH_R//a/b}")))          ; replace all
+    (sb-posix:setenv "SBSH_AB" "abcdef" 1)
+    (is (string= "cdef" (e "${SBSH_AB:2}")))           ; substring offset
+    (is (string= "cd" (e "${SBSH_AB:2:2}"))))          ; substring off+len
+  (sb-posix:unsetenv "SBSH_SO") (sb-posix:unsetenv "SBSH_R"))
+
+(test ifs-splitting
+  ;; default (whitespace) IFS collapses runs and trims
+  (let ((sbsh::*positional* '()))
+    (is (equal '("a" "b" "c") (sbsh::ifs-split "  a   b  c " " "))))
+  ;; a non-whitespace IFS preserves empty fields
+  (is (equal '("a" "b" "c") (sbsh::ifs-split "a:b:c" ":")))
+  (is (equal '("a" "" "b") (sbsh::ifs-split "a::b" ":")))
+  (is (equal '() (sbsh::ifs-split "   " " "))))
+
 (test test-and-or-operators
   (is (= 0 (sbsh::shell-test '("1" "-eq" "1" "-a" "2" "-eq" "2"))))
   (is (= 1 (sbsh::shell-test '("1" "-eq" "1" "-a" "2" "-eq" "3"))))

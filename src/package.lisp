@@ -82,6 +82,10 @@
 (defvar *pipestatus* '(0)
   "Exit statuses of the stages of the most recent pipeline, in order.")
 
+(defvar *cmdsub-status* nil
+  "Exit status of the last shell command substitution while realizing a
+command, so `x=$(false)` sets $? to 1.")
+
 (defvar *history-records* (make-array 0 :adjustable t :fill-pointer 0)
   "Structured, queryable history: one HIST-ENTRY per executed line.")
 

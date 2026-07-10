@@ -336,17 +336,49 @@ quotes and parens, so Lisp forms and $(...) are not split)."
   (let ((s (string-left-trim '(#\Space #\Tab) string)))
     (and (plusp (length s)) (char= (char s 0) #\())))
 
+(defun matching-brace (string open)
+  "Return the index of the } matching the { at OPEN (quote/brace aware)."
+  (let ((n (length string)) (depth 0) (q nil))
+    (loop for j from open below n
+          for c = (char string j)
+          do (cond
+               (q (when (char= c q) (setf q nil)))
+               ((or (char= c #\') (char= c #\")) (setf q c))
+               ((char= c #\{) (incf depth))
+               ((char= c #\}) (decf depth) (when (zerop depth) (return-from matching-brace j)))))
+    nil))
+
+(defun trailing-redirs (string)
+  "Parse STRING (the text after a compound/group terminator) into redir-specs."
+  (let ((s (string-trim '(#\Space #\Tab #\Newline #\Return) string)))
+    (if (zerop (length s)) '()
+        (command-redir-specs (build-command (tokenize s))))))
+
 (defun parse-stage (string)
-  "Parse one pipeline stage: a Lisp `(...)` filter, a { } group, or a command."
+  "Parse one pipeline stage: a Lisp `(...)` filter, an if/while/for/case
+compound, a { } group, or an ordinary command -- each with any trailing
+redirections applied to the whole construct."
   (cond
     ((lisp-stage-p string)
      (make-command :lisp (let ((*package* *user-package*))
                            (read-from-string string))))
     ((compound-stage-p string)
-     (make-command :special (list :compound
-                                  (string-trim '(#\Space #\Tab #\Newline #\Return) string))))
-    ((parse-brace-group string)
-     (make-command :special (list :group (parse-brace-group string))))
+     ;; Split the compound source from any trailing redirections (done > file).
+     (let* ((deep (compound-depth-map string))
+            (last-deep (position 1 deep :from-end t))
+            (end (if last-deep (1+ last-deep) (length string))))
+       (make-command :special (list :compound
+                                    (string-trim '(#\Space #\Tab #\Newline #\Return)
+                                                 (subseq string 0 end)))
+                     :redir-specs (trailing-redirs (subseq string end)))))
+    ((and (let ((s (string-left-trim '(#\Space #\Tab #\Newline) string)))
+            (and (>= (length s) 2) (char= (char s 0) #\{)
+                 (member (char s 1) '(#\Space #\Tab #\Newline #\Return))))
+          (matching-brace string (position #\{ string)))
+     (let* ((open (position #\{ string))
+            (close (matching-brace string open)))
+       (make-command :special (list :group (subseq string (1+ open) close))
+                     :redir-specs (trailing-redirs (subseq string (1+ close))))))
     (t (let ((cmd (build-command (tokenize string))))
          (and (or (command-words cmd) (command-redir-specs cmd)) cmd)))))
 
@@ -483,11 +515,13 @@ Words are kept raw; expansion is deferred to REALIZE-COMMAND at run time."
 and tilde-expand) just before CMD runs, filling in ARGV and REDIRS.  Returns
 CMD.  This is done at execution time so that $?, cwd, and environment changes
 from earlier commands on the same line are visible."
-  (unless (or (command-lisp cmd) (command-special cmd))  ; not expanded
-    (setf (command-argv cmd) (expand-words (command-words cmd)))
-    (apply-alias cmd)
-    (setf (command-redirs cmd)
-          (mapcar #'realize-redir (command-redir-specs cmd))))
+  (cond
+    ((command-lisp cmd))
+    ((command-special cmd)                 ; compounds/groups: redirs only
+     (setf (command-redirs cmd) (mapcar #'realize-redir (command-redir-specs cmd))))
+    (t (setf (command-argv cmd) (expand-words (command-words cmd)))
+       (apply-alias cmd)
+       (setf (command-redirs cmd) (mapcar #'realize-redir (command-redir-specs cmd)))))
   cmd)
 
 (defun realize-redir (spec)
