@@ -54,6 +54,18 @@
 (defvar *cd-hooks* '()
   "Functions of one argument (the new directory) run after a successful cd.")
 
+(defvar *functions* (make-hash-table :test 'equal)
+  "Map of shell-function name -> SHFUN.")
+
+(defvar *positional* '()
+  "The current positional parameters ($1, $2, ...) inside a function.")
+
+(defvar *in-function* nil
+  "True while executing a shell function body (enables `return`/`local`).")
+
+(defvar *function-local-restores* '()
+  "Thunks that restore variables shadowed by `local`, run on function return.")
+
 (defvar *history-records* (make-array 0 :adjustable t :fill-pointer 0)
   "Structured, queryable history: one HIST-ENTRY per executed line.")
 

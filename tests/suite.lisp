@@ -319,6 +319,45 @@ two
   (is (string= "val xyz done" (sbsh::expand-heredoc-body "val $SBSH_HD done")))
   (is (string= "$SBSH_HD kept" (sbsh::expand-heredoc-body "\\$SBSH_HD kept"))))
 
+(test positional-parameters
+  (let ((sbsh::*positional* '("a" "b" "c")))
+    (is (equal '("a") (sbsh::expand-words (sbsh::tokenize "$1"))))
+    (is (equal '("c") (sbsh::expand-words (sbsh::tokenize "$3"))))
+    (is (equal '("")  (sbsh::expand-words (sbsh::tokenize "$9"))))
+    (is (equal '("3") (sbsh::expand-words (sbsh::tokenize "$#"))))
+    (is (equal '("a b c") (word-texts (sbsh::tokenize "\"$@\""))))))
+
+(test function-def-parsing
+  (multiple-value-bind (name body) (sbsh::parse-function-def "foo() { echo hi; }")
+    (is (string= "foo" name))
+    (is (search "echo hi" body)))
+  (multiple-value-bind (name body) (sbsh::parse-function-def "function bar { echo bye; }")
+    (is (string= "bar" name))
+    (is (search "echo bye" body)))
+  (is (null (sbsh::parse-function-def "echo hello")))
+  (is (null (sbsh::parse-function-def "foo | bar"))))
+
+(test brace-group-parsing
+  (is (search "echo a" (sbsh::parse-brace-group "{ echo a; echo b; }")))
+  (is (null (sbsh::parse-brace-group "echo a")))
+  (is (null (sbsh::parse-brace-group "{echo}"))))   ; no space => brace expansion, not a group
+
+(test extract-brace-body-nesting
+  (is (string= " a { b } c " (sbsh::extract-brace-body "{ a { b } c }" 0))))
+
+(test newline-command-separator
+  (is (= 2 (length (sbsh::split-clauses (format nil "echo a~%echo b")))))
+  ;; a dangling pipe across a newline stays one clause (continuation)
+  (is (= 1 (length (sbsh::split-clauses (format nil "echo a |~%tr a-z A-Z")))))
+  ;; ; and newline inside a { } group are not top-level separators
+  (is (= 1 (length (sbsh::split-clauses "{ echo a; echo b; }")))))
+
+(test brace-incompleteness
+  (is (eq :brace (sbsh::incomplete-reason "foo() {")))
+  (is (eq :brace (sbsh::incomplete-reason "{ echo a")))
+  (is (null (sbsh::incomplete-reason "{ echo a; }")))
+  (is (null (sbsh::incomplete-reason "echo ${HOME}"))))   ; ${...} is not a group
+
 (test balanced-parens-reader
   (multiple-value-bind (inner after) (sbsh::read-balanced-parens "(a (b) c)xyz" 0)
     (is (string= "a (b) c" inner))

@@ -7,7 +7,8 @@
   (redir-specs '())  ; raw (TYPE FD TARGET): TARGET is a WORD or, for :dup, an int
   (argv '())         ; filled in by REALIZE-COMMAND at execution time
   (redirs '())       ; filled in by REALIZE-COMMAND at execution time
-  (lisp nil))        ; a Lisp form, when this stage is a `(...)` Lisp filter
+  (lisp nil)         ; a Lisp form, when this stage is a `(...)` Lisp filter
+  (special nil))     ; (:defun name body) or (:group body), for functions/groups
 
 (defstruct pipeline
   (commands '())       ; list of COMMAND
@@ -55,22 +56,34 @@ multiple lines so it is safe on continued (multi-line) input."
 input is expected: :QUOTE (open quote), :PAREN (unbalanced paren, e.g. a Lisp
 form), :BACKSLASH (trailing line-continuation), or :OPERATOR (dangling | && ||)."
   (let* ((string (strip-comment raw))
-         (i 0) (n (length string)) (q nil) (depth 0) (trailing-bs nil))
+         (i 0) (n (length string)) (q nil) (depth 0) (brace 0)
+         (boundary t) (trailing-bs nil))
     (loop while (< i n) do
       (let ((c (char string i)))
         (cond
           (q (cond ((and (char= c #\\) (char= q #\") (< (1+ i) n)) (incf i 2))
                    ((char= c q) (setf q nil) (incf i))
-                   (t (incf i))))
+                   (t (incf i)))
+             (setf boundary nil))
           ((char= c #\\)
-           (if (= i (1- n)) (progn (setf trailing-bs t) (incf i)) (incf i 2)))
-          ((or (char= c #\') (char= c #\")) (setf q c) (incf i))
-          ((char= c #\() (incf depth) (incf i))
-          ((char= c #\)) (when (plusp depth) (decf depth)) (incf i))
-          (t (incf i)))))
+           (if (= i (1- n)) (progn (setf trailing-bs t) (incf i)) (incf i 2))
+           (setf boundary nil))
+          ((or (char= c #\') (char= c #\")) (setf q c) (incf i) (setf boundary nil))
+          ((char= c #\() (incf depth) (incf i) (setf boundary t))
+          ((char= c #\)) (when (plusp depth) (decf depth)) (incf i) (setf boundary nil))
+          ((and (char= c #\{) boundary
+                (let ((nx (and (< (1+ i) n) (char string (1+ i)))))
+                  (or (null nx) (member nx '(#\Space #\Tab #\Newline #\Return)))))
+           (incf brace) (incf i) (setf boundary t))
+          ((and (char= c #\}) boundary) (when (plusp brace) (decf brace))
+           (incf i) (setf boundary nil))
+          ((member c '(#\Space #\Tab #\Newline #\Return #\; #\& #\| #\())
+           (incf i) (setf boundary t))
+          (t (incf i) (setf boundary nil)))))
     (cond
       (q :quote)
       ((plusp depth) :paren)
+      ((plusp brace) :brace)
       (trailing-bs :backslash)
       ((let ((s (string-right-trim '(#\Space #\Tab #\Newline #\Return) string)))
          (and (plusp (length s))
@@ -175,31 +188,51 @@ heredoc body) returning a string / :EOF / :CANCEL.  Returns a LOGICAL-LINE, or
   "Split STRING into a list of (:TEXT seg :TERMINATOR op) plists at top-level
 control operators, honoring quotes.  OP is one of :SEMI :AMP :AND :OR or NIL."
   (let* ((string (strip-comment raw-string))
-         (clauses '()) (start 0) (i 0) (n (length string)) (q nil) (depth 0))
+         (clauses '()) (start 0) (i 0) (n (length string)) (q nil) (depth 0)
+         (brace 0) (boundary t))
     (flet ((emit (end term consumed)
              (push (list :text (subseq string start end) :terminator term) clauses)
              (setf start (+ end consumed))))
       (loop while (< i n) do
         (let ((c (char string i)))
           (cond
-            (q (when (char= c q) (setf q nil)) (incf i))
-            ((char= c #\\) (incf i 2))
-            ((or (char= c #\') (char= c #\")) (setf q c) (incf i))
+            (q (when (char= c q) (setf q nil)) (incf i) (setf boundary nil))
+            ((char= c #\\) (incf i 2) (setf boundary nil))
+            ((or (char= c #\') (char= c #\")) (setf q c) (incf i) (setf boundary nil))
             ;; Inside ( ) — a Lisp form or $(...) — nothing is a separator.
-            ((char= c #\() (incf depth) (incf i))
-            ((char= c #\)) (when (plusp depth) (decf depth)) (incf i))
+            ((char= c #\() (incf depth) (incf i) (setf boundary t))
+            ((char= c #\)) (when (plusp depth) (decf depth)) (incf i) (setf boundary nil))
             ((plusp depth) (incf i))
-            ((char= c #\;) (emit i :semi 1) (incf i))
+            ;; A { ... } command group: track it so its inner ; and newlines
+            ;; are not treated as top-level separators.
+            ((and (char= c #\{) boundary
+                  (let ((nx (and (< (1+ i) n) (char string (1+ i)))))
+                    (or (null nx) (member nx '(#\Space #\Tab #\Newline #\Return)))))
+             (incf brace) (incf i) (setf boundary t))
+            ((and (char= c #\}) boundary (plusp brace))
+             (decf brace) (incf i) (setf boundary nil))
+            ((plusp brace) (incf i)
+             (setf boundary (member c '(#\Space #\Tab #\Newline #\Return #\;))))
+            ((char= c #\;) (emit i :semi 1) (incf i) (setf boundary t))
+            ((char= c #\Newline)
+             ;; A newline separates commands, unless the segment so far ends in
+             ;; a dangling operator (then it is a line continuation).
+             (let ((seg (string-right-trim '(#\Space #\Tab) (subseq string start i))))
+               (if (and (plusp (length seg))
+                        (member (char seg (1- (length seg))) '(#\| #\< #\>)))
+                   (progn (incf i) (setf boundary t))
+                   (progn (emit i :semi 1) (incf i) (setf boundary t)))))
             ((char= c #\&)
              (cond
                ((and (< (1+ i) n) (char= (char string (1+ i)) #\&))
-                (emit i :and 2) (incf i 2))
+                (emit i :and 2) (incf i 2) (setf boundary t))
                ;; A & that is part of a >& fd-duplication is NOT a separator.
-               ((and (> i 0) (char= (char string (1- i)) #\>)) (incf i))
-               (t (emit i :amp 1) (incf i))))
+               ((and (> i 0) (char= (char string (1- i)) #\>)) (incf i) (setf boundary nil))
+               (t (emit i :amp 1) (incf i) (setf boundary t))))
             ((and (char= c #\|) (< (1+ i) n) (char= (char string (1+ i)) #\|))
-             (emit i :or 2) (incf i 2))
-            (t (incf i)))))
+             (emit i :or 2) (incf i 2) (setf boundary t))
+            (t (incf i)
+               (setf boundary (member c '(#\Space #\Tab #\Return #\|)))))))
       (emit n nil 0)
       (remove-if (lambda (cl)
                    (and (null (getf cl :terminator))
@@ -210,18 +243,27 @@ control operators, honoring quotes.  OP is one of :SEMI :AMP :AND :OR or NIL."
 (defun split-pipeline-stages (string)
   "Split a clause segment into raw stage strings at top-level | (respecting
 quotes and parens, so Lisp forms and $(...) are not split)."
-  (let ((stages '()) (start 0) (i 0) (n (length string)) (q nil) (depth 0))
+  (let ((stages '()) (start 0) (i 0) (n (length string)) (q nil) (depth 0)
+        (brace 0) (boundary t))
     (loop while (< i n) do
       (let ((c (char string i)))
         (cond
-          (q (when (char= c q) (setf q nil)) (incf i))
-          ((char= c #\\) (incf i 2))
-          ((or (char= c #\') (char= c #\")) (setf q c) (incf i))
-          ((char= c #\() (incf depth) (incf i))
-          ((char= c #\)) (when (plusp depth) (decf depth)) (incf i))
-          ((and (zerop depth) (char= c #\|))
-           (push (subseq string start i) stages) (setf start (1+ i)) (incf i))
-          (t (incf i)))))
+          (q (when (char= c q) (setf q nil)) (incf i) (setf boundary nil))
+          ((char= c #\\) (incf i 2) (setf boundary nil))
+          ((or (char= c #\') (char= c #\")) (setf q c) (incf i) (setf boundary nil))
+          ((char= c #\() (incf depth) (incf i) (setf boundary t))
+          ((char= c #\)) (when (plusp depth) (decf depth)) (incf i) (setf boundary nil))
+          ((and (char= c #\{) boundary (plusp depth)) (incf i))  ; inside parens, ignore
+          ((and (char= c #\{) boundary
+                (let ((nx (and (< (1+ i) n) (char string (1+ i)))))
+                  (or (null nx) (member nx '(#\Space #\Tab #\Newline #\Return)))))
+           (incf brace) (incf i) (setf boundary t))
+          ((and (char= c #\}) boundary (plusp brace)) (decf brace) (incf i) (setf boundary nil))
+          ((and (zerop depth) (zerop brace) (char= c #\|))
+           (push (subseq string start i) stages) (setf start (1+ i)) (incf i)
+           (setf boundary t))
+          (t (incf i)
+             (setf boundary (member c '(#\Space #\Tab #\Newline #\Return #\; #\&)))))))
     (push (subseq string start) stages)
     (nreverse stages)))
 
@@ -230,20 +272,84 @@ quotes and parens, so Lisp forms and $(...) are not split)."
     (and (plusp (length s)) (char= (char s 0) #\())))
 
 (defun parse-stage (string)
-  "Parse one pipeline stage: a Lisp `(...)` filter or an ordinary command."
-  (if (lisp-stage-p string)
-      (make-command :lisp (let ((*package* *user-package*))
-                            (read-from-string string)))
-      (let ((cmd (build-command (tokenize string))))
-        (and (or (command-words cmd) (command-redir-specs cmd)) cmd))))
+  "Parse one pipeline stage: a Lisp `(...)` filter, a { } group, or a command."
+  (cond
+    ((lisp-stage-p string)
+     (make-command :lisp (let ((*package* *user-package*))
+                           (read-from-string string))))
+    ((parse-brace-group string)
+     (make-command :special (list :group (parse-brace-group string))))
+    (t (let ((cmd (build-command (tokenize string))))
+         (and (or (command-words cmd) (command-redir-specs cmd)) cmd)))))
+
+;;; --- Function definitions and brace groups ------------------------------
+
+(defun function-name-char-p (c)
+  (or (alphanumericp c) (member c '(#\_ #\- #\.))))
+
+(defun extract-brace-body (s brace-pos)
+  "S[brace-pos] is `{`.  Return the text between it and the matching `}`
+(quote/brace aware), or NIL if unbalanced."
+  (let ((n (length s)) (depth 0) (q nil))
+    (loop for j from brace-pos below n
+          for c = (char s j)
+          do (cond
+               (q (when (char= c q) (setf q nil)))
+               ((or (char= c #\') (char= c #\")) (setf q c))
+               ((char= c #\{) (incf depth))
+               ((char= c #\})
+                (decf depth)
+                (when (zerop depth)
+                  (return-from extract-brace-body (subseq s (1+ brace-pos) j))))))
+    nil))
+
+(defun skip-blanks (s i)
+  (loop while (and (< i (length s))
+                   (member (char s i) '(#\Space #\Tab #\Newline #\Return)))
+        do (incf i))
+  i)
+
+(defun parse-function-def (segment)
+  "If SEGMENT is `name() { body }` or `function name { body }`, return
+(values NAME BODY-TEXT); otherwise NIL."
+  (let* ((s (string-trim '(#\Space #\Tab #\Newline #\Return) segment))
+         (n (length s)) (i 0) (fnkw nil))
+    (when (and (>= n 9) (string= "function " (subseq s 0 9)))
+      (setf fnkw t i (skip-blanks s 9)))
+    (let ((name-start i))
+      (loop while (and (< i n) (function-name-char-p (char s i))) do (incf i))
+      (let ((name (subseq s name-start i)))
+        (when (plusp (length name))
+          (let ((j (skip-blanks s i)) (has-parens nil))
+            (when (and (< j n) (char= (char s j) #\())
+              (setf j (skip-blanks s (1+ j)))
+              (when (and (< j n) (char= (char s j) #\)))
+                (setf has-parens t j (1+ j))))
+            (when (or has-parens fnkw)
+              (setf j (skip-blanks s j))
+              (when (and (< j n) (char= (char s j) #\{))
+                (let ((body (extract-brace-body s j)))
+                  (when body (values name body)))))))))))
+
+(defun parse-brace-group (segment)
+  "If SEGMENT is a `{ list; }` group, return its body text, else NIL."
+  (let* ((s (string-trim '(#\Space #\Tab #\Newline #\Return) segment)))
+    (when (and (>= (length s) 2) (char= (char s 0) #\{)
+               (char= (char s (1- (length s))) #\})   ; the group must end the stage
+               (member (char s 1) '(#\Space #\Tab #\Newline #\Return)))
+      (extract-brace-body s 0))))
 
 (defun parse-segment (string)
-  "Parse a single clause segment (no control operators) into a PIPELINE,
-splitting it into stages, or NIL when the segment is empty."
-  (let ((commands (loop for s in (split-pipeline-stages string)
-                        for cmd = (parse-stage s)
-                        when cmd collect cmd)))
-    (and commands (make-pipeline :commands commands))))
+  "Parse a single clause segment (no control operators) into a PIPELINE: a
+function definition, a { } group, or a stage pipeline.  NIL when empty."
+  (multiple-value-bind (fname fbody) (parse-function-def string)
+    (cond
+      (fname
+       (make-pipeline :commands (list (make-command :special (list :defun fname fbody)))))
+      (t (let ((commands (loop for s in (split-pipeline-stages string)
+                               for cmd = (parse-stage s)
+                               when cmd collect cmd)))
+           (and commands (make-pipeline :commands commands)))))))
 
 (defun terminator->connector (term)
   (case term (:and :and) (:or :or) (t :seq)))
@@ -302,7 +408,7 @@ Words are kept raw; expansion is deferred to REALIZE-COMMAND at run time."
 and tilde-expand) just before CMD runs, filling in ARGV and REDIRS.  Returns
 CMD.  This is done at execution time so that $?, cwd, and environment changes
 from earlier commands on the same line are visible."
-  (unless (command-lisp cmd)             ; Lisp filter stages are not expanded
+  (unless (or (command-lisp cmd) (command-special cmd))  ; not expanded
     (setf (command-argv cmd) (expand-words (command-words cmd)))
     (apply-alias cmd)
     (setf (command-redirs cmd)

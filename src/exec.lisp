@@ -118,6 +118,21 @@ the child.  argv is built before the fork so the child does no allocation."
             (child-setup pgid infd outfd foreground fds-to-close nil)
             (run-lisp-filter (command-lisp cmd))
             (sb-ext:exit :code 0 :abort t)))))
+  ;; A { } group or a shell-function call as a pipeline stage: fork and run it.
+  (let ((fn (and (not (command-special cmd)) (command-argv cmd)
+                 (shell-function (first (command-argv cmd))))))
+    (when (or (command-special cmd) fn)
+      (let ((pid (sb-posix:fork)))
+        (if (not (zerop pid))
+            (return-from fork-command pid)
+            (progn
+              (child-setup pgid infd outfd foreground fds-to-close
+                           (if fn (command-redirs cmd) nil))
+              (let ((code (if (command-special cmd)
+                              (progn (run-special (command-special cmd)) *last-status*)
+                              (call-shell-function fn (rest (command-argv cmd))))))
+                (finish-output)
+                (sb-ext:exit :code (if (integerp code) code 0) :abort t)))))))
   (let* ((argv (command-argv cmd))
          (builtin (and argv (builtin-p (first argv))))
          (alien-argv (and argv (not builtin) (build-argv argv)))
@@ -231,20 +246,60 @@ command's ARGV to the remaining words.  Returns nothing."
       (dolist (a (subseq argv 0 i)) (apply-assignment a))
       (setf (command-argv cmd) (subseq argv i)))))
 
+;;; --- Shell functions and { } groups -------------------------------------
+
+(defstruct shfun name body source)
+
+(defun shell-function (name)
+  (gethash name *functions*))
+
+(defun run-special (special)
+  "Run a special command: define a function or execute a { } group."
+  (destructuring-bind (kind . rest) special
+    (ecase kind
+      (:defun
+       (destructuring-bind (name body) rest
+         (setf (gethash name *functions*)
+               (make-shfun :name name :body body :source body))
+         (setf *last-status* 0)))
+      (:group
+       (run-command-line (first rest))))))
+
+(defun call-shell-function (fn args)
+  "Invoke shell function FN with ARGS bound as positional parameters.  A
+`return` unwinds via the SBSH-RETURN catch; `local`s are restored on exit."
+  (let ((*positional* args)
+        (*in-function* t)
+        (*heredoc-bodies* nil)
+        (*function-local-restores* '()))
+    (unwind-protect
+         (catch 'sbsh-return
+           (run-command-line (shfun-body fn))
+           *last-status*)
+      (dolist (r *function-local-restores*) (ignore-errors (funcall r))))))
+
 (defun launch-pipeline (pipeline)
   "Fork the commands of PIPELINE into a process group and run it."
   (mapc #'realize-command (pipeline-commands pipeline))
   (dolist (c (pipeline-commands pipeline))
     (push (if (command-lisp c) (list :lisp) (command-argv c)) *line-commands*))
   (let ((cmds (pipeline-commands pipeline)))
-    ;; A single Lisp `(...)` stage runs in the shell process itself, so that
-    ;; definitions and assignments affect the live image (hot reloading).
-    (when (and (= (length cmds) 1)
-               (command-lisp (first cmds))
-               (not (pipeline-background pipeline)))
-      (return-from launch-pipeline (run-lisp-in-process (command-lisp (first cmds)))))
+    ;; Single-command pipelines that must run in the shell process itself
+    ;; (so they affect the live image / shell state): specials, Lisp, functions.
+    (when (and (= (length cmds) 1) (not (pipeline-background pipeline)))
+      (let* ((cmd (first cmds)))
+        (when (command-special cmd)
+          (return-from launch-pipeline (run-special (command-special cmd))))
+        (when (command-lisp cmd)
+          (return-from launch-pipeline (run-lisp-in-process (command-lisp cmd))))
+        (strip-leading-assignments cmd)
+        (let ((fn (and (command-argv cmd) (shell-function (first (command-argv cmd))))))
+          (when fn
+            (return-from launch-pipeline
+              (setf *last-status*
+                    (call-shell-function fn (rest (command-argv cmd)))))))))
     ;; Leading VAR=value assignments on the first command set the environment.
-    (when (first cmds)
+    (when (and (first cmds) (not (command-special (first cmds))))
       (strip-leading-assignments (first cmds))))
   (when (standalone-builtin-p pipeline)
     (return-from launch-pipeline (run-standalone-builtin pipeline)))
@@ -377,7 +432,9 @@ correctable COMMAND-NOT-FOUND (with a USE-COMMAND restart) otherwise."
     (let ((argv (command-argv cmd)))
       (when (and argv
                  (not (command-lisp cmd))
+                 (not (command-special cmd))
                  (not (builtin-p (first argv)))
+                 (not (shell-function (first argv)))
                  (not (resolve-executable (first argv))))
         (restart-case
             (error 'command-not-found
@@ -472,12 +529,14 @@ write the result to stdout."
     path))
 
 (defun command-substitute (body)
-  "Value of a $(...) substitution.  A leading ( is evaluated as Lisp; anything
-else is run as a shell command whose stdout is captured."
+  "Value of a $(...) substitution.  A leading ( is evaluated as Lisp (with
+shell $VAR/$1/$(...) references in the form expanded first, so arithmetic like
+$((- $1 1)) works); anything else is run as a shell command whose stdout is
+captured."
   (if (lisp-stage-p body)
       (handler-case
           (let ((*package* *user-package*))
-            (princ-to-string (eval (read-from-string body))))
+            (princ-to-string (eval (read-from-string (expand-heredoc-body body)))))
         (error () ""))
       (capture-command-output body)))
 

@@ -31,10 +31,18 @@
     (t string)))
 
 (defun var-value (name)
-  "Look up shell/environment variable NAME, handling specials $? and $$."
+  "Look up a variable NAME: specials ($? $$ $# $@ $* $0), positional params
+($1..), then the environment."
   (cond
     ((string= name "?") (princ-to-string *last-status*))
     ((string= name "$") (princ-to-string (sb-posix:getpid)))
+    ((string= name "#") (princ-to-string (length *positional*)))
+    ((or (string= name "@") (string= name "*"))
+     (format nil "~{~A~^ ~}" *positional*))
+    ((string= name "0") (or (getenv "0") "sbsh"))
+    ((and (plusp (length name)) (every #'digit-char-p name))
+     (let ((idx (parse-integer name)))
+       (if (<= 1 idx (length *positional*)) (nth (1- idx) *positional*) "")))
     (t (or (getenv name) ""))))
 
 (defun var-name-char-p (c)
@@ -191,7 +199,8 @@ Returns (values VALUE INDEX-AFTER)."
        (let ((end (position #\} string :start i)))
          (unless end (error 'shell-parse-error :message "unterminated ${"))
          (values (var-value (subseq string (1+ i) end)) (1+ end))))
-      ((or (char= (char string i) #\?) (char= (char string i) #\$))
+      ;; $? $$ $# $@ $* and single-digit positionals $1..$9
+      ((member (char string i) '(#\? #\$ #\# #\@ #\* #\0 #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9))
        (values (var-value (string (char string i))) (1+ i)))
       ((var-name-char-p (char string i))
        (let ((end (or (position-if-not #'var-name-char-p string :start i) n)))

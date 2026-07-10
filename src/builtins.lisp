@@ -49,15 +49,20 @@
         (format *error-output* "cd: ~A: No such file or directory~%" dest)
         1))))
 
+(defun file-exists-p (path)
+  "True if PATH exists, using stat(2) so characters like [ that are CL
+pathname wildcards (e.g. the `[` command) are handled literally."
+  (ignore-errors (sb-posix:stat path) t))
+
 (defun path-search (name)
   "Return the full path of executable NAME found on $PATH, or NIL.
-Names containing a slash are returned as-is if executable."
+Names containing a slash are returned as-is if they exist."
   (if (find #\/ name)
-      (and (probe-file name) name)
+      (and (file-exists-p name) name)
       (dolist (dir (split-on-char (or (getenv "PATH") "") #\:) nil)
         (when (plusp (length dir))
           (let ((candidate (format nil "~A/~A" (string-right-trim "/" dir) name)))
-            (when (probe-file candidate)
+            (when (file-exists-p candidate)
               (return candidate)))))))
 
 ;;; --- Builtins -----------------------------------------------------------
@@ -94,9 +99,10 @@ Names containing a slash are returned as-is if executable."
         0)))
 
 (define-builtin "unset" (args)
-  (dolist (a args)
-    (handler-case (sb-posix:unsetenv a)
-      (error () (ignore-errors (sb-posix:setenv a "" 1)))))
+  (let ((funcs nil))
+    (when (and args (string= (first args) "-f")) (setf funcs t args (rest args)))
+    (dolist (a args)
+      (if funcs (remhash a *functions*) (env-unset a))))
   0)
 
 (define-builtin "env" (args)
@@ -137,10 +143,40 @@ Names containing a slash are returned as-is if executable."
 (define-builtin "type" (args)
   (dolist (name args)
     (cond
+      ((shell-function name) (format t "~A is a function~%" name))
+      ((nth-value 1 (gethash name *aliases*))
+       (format t "~A is aliased to '~{~A~^ ~}'~%" name (gethash name *aliases*)))
       ((builtin-p name) (format t "~A is a shell builtin~%" name))
       ((path-search name) (format t "~A is ~A~%" name (path-search name)))
       (t (format t "~A: not found~%" name))))
   0)
+
+(defun env-unset (name)
+  "Unset environment variable NAME (falling back to empty when unsupported)."
+  (handler-case (sb-posix:unsetenv name)
+    (error () (ignore-errors (sb-posix:setenv name "" 1)))))
+
+(define-builtin "return" (args)
+  (if (not *in-function*)
+      (progn (format *error-output* "return: can only `return' from a function~%") 1)
+      (throw 'sbsh-return
+        (if args (or (parse-integer (first args) :junk-allowed t) 0) *last-status*))))
+
+(define-builtin "local" (args)
+  (if (not *in-function*)
+      (progn (format *error-output* "local: can only be used in a function~%") 1)
+      (progn
+        (dolist (a args)
+          (let* ((eq (position #\= a))
+                 (name (if eq (subseq a 0 eq) a))
+                 (old (sb-posix:getenv name)))
+            ;; Save the shadowed value; restored when the function returns.
+            (push (if old
+                      (lambda () (sb-posix:setenv name old 1))
+                      (lambda () (env-unset name)))
+                  *function-local-restores*)
+            (sb-posix:setenv name (if eq (subseq a (1+ eq)) "") 1)))
+        0)))
 
 (defun signal-number (spec)
   "Translate a signal SPEC like \"9\", \"KILL\", or \"SIGKILL\" to a number."
