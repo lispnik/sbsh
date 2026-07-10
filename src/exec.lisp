@@ -42,6 +42,7 @@ controlling terminal, and ignore job-control signals."
 (defun open-redir-file (type file)
   (ecase type
     (:in (sb-posix:open file sb-posix:o-rdonly))
+    (:readwrite (sb-posix:open file (logior sb-posix:o-rdwr sb-posix:o-creat) #o644))
     ;; A heredoc/here-string temp file: open for reading, then unlink it right
     ;; away -- the open fd keeps the data alive and no cleanup is needed.
     (:heredoc (let ((fd (sb-posix:open file sb-posix:o-rdonly)))

@@ -206,21 +206,46 @@ Returns (values MATCHED-P INDEX-AFTER-CLASS)."
          (negate (and (< i (length pattern))
                       (member (char pattern i) '(#\! #\^)))))
     (when negate (incf i))
-    (let ((matched nil) (start i))
+    (let ((matched nil) (start i) (n (length pattern)))
       (loop
-        (when (>= i (length pattern)) (return))
+        (when (>= i n) (return))
         (when (and (char= (char pattern i) #\]) (> i start)) (return))
-        (if (and (< (+ i 2) (length pattern))
-                 (char= (char pattern (1+ i)) #\-)
-                 (char/= (char pattern (+ i 2)) #\]))
-            (progn
-              (when (char<= (char pattern i) ch (char pattern (+ i 2)))
-                (setf matched t))
-              (incf i 3))
-            (progn
-              (when (char= (char pattern i) ch) (setf matched t))
-              (incf i))))
+        (cond
+          ;; POSIX character class [:name:]
+          ((and (char= (char pattern i) #\[) (< (1+ i) n)
+                (char= (char pattern (1+ i)) #\:))
+           (let ((end (search ":]" pattern :start2 (+ i 2))))
+             (if end
+                 (progn
+                   (when (posix-class-member (subseq pattern (+ i 2) end) ch)
+                     (setf matched t))
+                   (setf i (+ end 2)))
+                 (progn (when (char= (char pattern i) ch) (setf matched t)) (incf i)))))
+          ;; range a-z
+          ((and (< (+ i 2) n) (char= (char pattern (1+ i)) #\-)
+                (char/= (char pattern (+ i 2)) #\]))
+           (when (char<= (char pattern i) ch (char pattern (+ i 2))) (setf matched t))
+           (incf i 3))
+          (t (when (char= (char pattern i) ch) (setf matched t)) (incf i))))
       (values (if negate (not matched) matched) (1+ i)))))
+
+(defun posix-class-member (name ch)
+  "True if CH belongs to the POSIX character class NAME (digit, alpha, ...)."
+  (cond
+    ((string= name "digit") (and (digit-char-p ch) t))
+    ((string= name "alpha") (alpha-char-p ch))
+    ((string= name "alnum") (alphanumericp ch))
+    ((string= name "upper") (upper-case-p ch))
+    ((string= name "lower") (lower-case-p ch))
+    ((string= name "space") (and (member ch '(#\Space #\Tab #\Newline #\Return #\Page)) t))
+    ((string= name "blank") (and (member ch '(#\Space #\Tab)) t))
+    ((string= name "xdigit") (and (digit-char-p ch 16) t))
+    ((string= name "print") (and (graphic-char-p ch) t))
+    ((string= name "graph") (and (graphic-char-p ch) (char/= ch #\Space)))
+    ((string= name "cntrl") (not (graphic-char-p ch)))
+    ((string= name "punct")
+     (and (graphic-char-p ch) (not (alphanumericp ch)) (char/= ch #\Space)))
+    (t nil)))
 
 (defun unescape-namestring (s)
   "Remove the backslash escapes SBCL adds before pathname metacharacters
@@ -493,6 +518,9 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
                       (declare (ignore delim))
                       (push (list :redir :heredoc (or fd 0) quoted strip) tokens)
                       (setf i nj))))
+                 ;; <> open a file for reading and writing on the fd (default 0)
+                 ((eql (peek 1) #\>)
+                  (push (list :redir :readwrite (or fd 0)) tokens) (incf i 2))
                  (t (push (list :redir :in (or fd 0)) tokens) (incf i)))))
             ((char= c #\>)
              (let ((fd (digits-or nil (pending))))
@@ -500,6 +528,8 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
                (flush)
                (cond
                  ((eql (peek 1) #\>) (push (list :redir :append (or fd 1)) tokens) (incf i 2))
+                 ;; >| overrides noclobber; sbsh has none, so it is just >.
+                 ((eql (peek 1) #\|) (push (list :redir :out (or fd 1)) tokens) (incf i 2))
                  ((and (eql (peek 1) #\&) (peek 2) (digit-char-p (peek 2)))
                   (push (list :redir :dup (or fd 1) (digit-char-p (peek 2))) tokens)
                   (incf i 3))

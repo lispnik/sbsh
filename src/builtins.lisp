@@ -307,15 +307,42 @@ gets the unsplit remainder (internal whitespace preserved, ends trimmed)."
                    (progn (incf i) (loop while (and (< i len) (ws-p (char line i))) do (incf i)))
                    (loop while (and (< i len) (ws-p (char line i))) do (incf i))))))))))
 
+(defun read-input-line (raw-p)
+  "Read one input line for `read`.  Unless RAW-P, backslash escapes the next
+character and a trailing backslash continues onto the next line.  Returns
+(values LINE MISSING-NEWLINE); LINE is NIL at end of input."
+  (multiple-value-bind (line missing) (read-line (tty-in) nil nil)
+    (cond
+      ((null line) (values nil t))
+      (raw-p (values line missing))
+      (t (let ((out (make-string-output-stream)))
+           (loop
+             (let ((i 0) (n (length line)) (cont nil))
+               (loop while (< i n) do
+                 (let ((c (char line i)))
+                   (cond
+                     ((and (char= c #\\) (= i (1- n))) (setf cont t) (incf i))
+                     ((and (char= c #\\) (< (1+ i) n))
+                      (write-char (char line (1+ i)) out) (incf i 2))
+                     (t (write-char c out) (incf i)))))
+               (if cont
+                   (multiple-value-bind (nl nm) (read-line (tty-in) nil nil)
+                     (if (null nl) (progn (setf missing t) (return))
+                         (setf line nl missing nm)))
+                   (return))))
+           (values (get-output-stream-string out) missing))))))
+
 (define-builtin "read" (args)
   "read [-r] [VAR...] -- read a line of stdin into variables (REPLY by default).
-Returns 1 at end of input (a final line with no newline still assigns)."
-  (when (and args (string= (first args) "-r")) (setf args (rest args)))
-  (multiple-value-bind (line missing-newline) (read-line (tty-in) nil nil)
-    (if (null line)
-        1                               ; end of input, nothing read
-        (progn (assign-read-vars (or args (list "REPLY")) line)
-               (if missing-newline 1 0)))))
+Without -r, backslash escapes and line continuation are processed.  Returns 1
+at end of input (a final line with no newline still assigns)."
+  (let ((raw-p (and args (string= (first args) "-r"))))
+    (when raw-p (setf args (rest args)))
+    (multiple-value-bind (line missing-newline) (read-input-line raw-p)
+      (if (null line)
+          1                             ; end of input, nothing read
+          (progn (assign-read-vars (or args (list "REPLY")) line)
+                 (if missing-newline 1 0))))))
 
 (define-builtin "wait" (args)
   "Block until all child processes have finished."

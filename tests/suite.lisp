@@ -17,6 +17,26 @@
   (is-false (sbsh::fnmatch "?at" "at"))
   (is-false (sbsh::fnmatch "?at" "chat")))
 
+(test fnmatch-posix-classes
+  (is-true  (sbsh::fnmatch "[[:digit:]]" "5"))
+  (is-false (sbsh::fnmatch "[[:digit:]]" "a"))
+  (is-true  (sbsh::fnmatch "[[:alpha:]]" "Q"))
+  (is-false (sbsh::fnmatch "[[:alpha:]]" "3"))
+  (is-true  (sbsh::fnmatch "file[[:digit:]]" "file7"))
+  (is-true  (sbsh::fnmatch "[[:upper:]]" "A"))
+  (is-false (sbsh::fnmatch "[[:upper:]]" "a"))
+  (is-true  (sbsh::fnmatch "[[:space:]]" " ")))
+
+(test readwrite-and-noclobber-redirs
+  ;; <> parses as a read-write redirection; >| parses as truncating output
+  (let ((cmd (first (sbsh::pipeline-commands
+                     (sbsh::clause-pipeline (first (sbsh::parse-line "cat <>/tmp/x")))))))
+    (is (equal '((:readwrite 0 "/tmp/x")) (sbsh::command-redirs cmd))))
+  (let ((cmd (first (sbsh::pipeline-commands
+                     (sbsh::clause-pipeline (first (sbsh::parse-line "echo hi >|/tmp/y")))))))
+    (is (equal '(("echo" "hi")) (list (sbsh::command-argv cmd))))
+    (is (equal '((:out 1 "/tmp/y")) (sbsh::command-redirs cmd)))))
+
 (test fnmatch-class
   (is-true  (sbsh::fnmatch "[abc]at" "bat"))
   (is-false (sbsh::fnmatch "[abc]at" "dat"))

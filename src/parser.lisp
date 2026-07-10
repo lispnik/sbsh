@@ -324,6 +324,8 @@ quotes and parens, so Lisp forms and $(...) are not split)."
                   (or (null nx) (member nx '(#\Space #\Tab #\Newline #\Return)))))
            (incf brace) (incf i) (setf boundary t))
           ((and (char= c #\}) boundary (plusp brace)) (decf brace) (incf i) (setf boundary nil))
+          ;; A | preceded by > is the >| noclobber-override, not a pipe.
+          ((and (char= c #\|) (> i 0) (char= (char string (1- i)) #\>)) (incf i))
           ((and (zerop depth) (zerop brace) (char= c #\|))
            (push (subseq string start i) stages) (setf start (1+ i)) (incf i)
            (setf boundary t))
