@@ -446,7 +446,9 @@ the interactive correction menu (innermost handler) and otherwise fails 127."
       (setf *last-status* 1))
     (shell-error (e)
       (format *error-output* "sbsh: ~A~%" e)
-      (setf *last-status* 1))))
+      (setf *last-status* 1)
+      ;; An expansion error (${v:?}, set -u) exits a non-interactive shell.
+      (unless *interactive* (setf *should-exit* 1)))))
 
 ;;; --- Top-level entry ----------------------------------------------------
 

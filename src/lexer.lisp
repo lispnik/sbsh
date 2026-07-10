@@ -6,9 +6,10 @@
 ;;; (quoting suppresses later globbing).  Operators are represented as
 ;;; keywords, and redirections as (:REDIR type fd [target]) lists.
 
-(defstruct (word (:constructor make-word (text &optional quoted)))
+(defstruct (word (:constructor make-word (text &optional quoted from-split)))
   text
-  (quoted nil))
+  (quoted nil)
+  (from-split nil))   ; a field produced by IFS splitting (keep even if empty)
 
 (define-condition shell-parse-error (error)
   ((message :initarg :message :reader parse-error-message))
@@ -496,9 +497,14 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
                          ((null fields))     ; expanded to nothing
                          ((and (= (length fields) 1) (string= (first fields) val))
                           (write-string val cur))
+                         ;; Multiple fields: each becomes its own word.  Mark
+                         ;; them FROM-SPLIT so empty fields (a,,b under IFS=,)
+                         ;; are kept rather than dropped as empty expansions.
                          (t (write-string (first fields) cur)
                             (dolist (f (rest fields))
-                              (flush) (ensure-cur) (write-string f cur)))))))))
+                              (push (make-word (get-output-stream-string cur) quoted t) tokens)
+                              (setf cur (make-string-output-stream) quoted nil)
+                              (write-string f cur)))))))))
             ((char= c #\|)
              (flush)
              (if (eql (peek 1) #\|) (progn (push :or tokens) (incf i 2))
@@ -606,6 +612,8 @@ word is kept); an unquoted word that expanded to nothing is dropped."
         for text = (if (word-quoted w) (word-text w) (maybe-tilde (word-text w)))
         append (cond
                  ((word-quoted w) (list text))
-                 ((zerop (length text)) nil)   ; unquoted empty expansion: no word
+                 ;; unquoted empty expansion drops out, unless it is a genuine
+                 ;; (possibly empty) field produced by IFS splitting
+                 ((and (zerop (length text)) (not (word-from-split w))) nil)
                  ((wildcard-p text) (or (glob-expand text) (list text)))
                  (t (list text)))))

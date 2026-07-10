@@ -550,6 +550,17 @@ two
   (is (string= "/a/b" (sbsh::normalize-path "/a/./b/")))
   (is (string= "/x/y" (sbsh::normalize-path "//x///y//"))))
 
+(test empty-field-preservation
+  ;; empty unquoted expansion yields no word...
+  (sb-posix:setenv "SBSH_E" "" 1)
+  (is (equal '() (sbsh::expand-words (sbsh::tokenize "$SBSH_E"))))
+  ;; ...but empty fields from a non-whitespace IFS are kept
+  (sb-posix:setenv "SBSH_C" "a,,b" 1)
+  (sb-posix:setenv "IFS" "," 1)
+  (is (equal '("a" "" "b") (sbsh::expand-words (sbsh::tokenize "$SBSH_C"))))
+  (sb-posix:unsetenv "IFS")
+  (sb-posix:unsetenv "SBSH_E") (sb-posix:unsetenv "SBSH_C"))
+
 (test ifs-splitting
   ;; default (whitespace) IFS collapses runs and trims
   (let ((sbsh::*positional* '()))
