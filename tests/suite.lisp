@@ -475,6 +475,15 @@ two
     (is (string= "cd" (e "${SBSH_AB:2:2}"))))          ; substring off+len
   (sb-posix:unsetenv "SBSH_SO") (sb-posix:unsetenv "SBSH_R"))
 
+(test path-normalization
+  (is (string= "/a/b/c" (sbsh::normalize-path "/a/b/c")))
+  (is (string= "/a/c" (sbsh::normalize-path "/a/b/../c")))
+  (is (string= "/a" (sbsh::normalize-path "/a/b/..")))
+  (is (string= "/" (sbsh::normalize-path "/a/..")))
+  (is (string= "/" (sbsh::normalize-path "/../..")))
+  (is (string= "/a/b" (sbsh::normalize-path "/a/./b/")))
+  (is (string= "/x/y" (sbsh::normalize-path "//x///y//"))))
+
 (test ifs-splitting
   ;; default (whitespace) IFS collapses runs and trims
   (let ((sbsh::*positional* '()))

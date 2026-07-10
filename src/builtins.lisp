@@ -19,31 +19,55 @@
 
 ;;; --- Filesystem / process helpers ---------------------------------------
 
-(defun update-cwd (dir)
-  "chdir to DIR (a namestring), updating *default-pathname-defaults* and PWD."
-  (sb-posix:chdir dir)
-  (let ((cwd (sb-posix:getcwd)))
-    (setf *default-pathname-defaults*
-          (pathname (concatenate 'string (string-right-trim "/" cwd) "/")))
-    (sb-posix:setenv "PWD" cwd 1)
-    cwd))
+(defun normalize-path (path)
+  "Resolve . and .. components of an absolute PATH textually (without following
+symlinks), so cd keeps the logical path like bash's default."
+  (let ((stack '()))
+    (dolist (p (split-on-char path #\/))
+      (cond
+        ((or (string= p "") (string= p ".")))
+        ((string= p "..") (when stack (pop stack)))
+        (t (push p stack))))
+    (if stack
+        (format nil "~{/~A~}" (nreverse stack))
+        "/")))
+
+(defun logical-path (target)
+  "The logical absolute path of TARGET relative to $PWD."
+  (normalize-path
+   (if (and (plusp (length target)) (char= (char target 0) #\/))
+       target
+       (concatenate 'string (or (getenv "PWD") (sb-posix:getcwd)) "/" target))))
+
+(defun update-cwd (logical physical)
+  "Record LOGICAL as $PWD after having chdir'd; PHYSICAL is the fallback path."
+  (setf *default-pathname-defaults*
+        (pathname (concatenate 'string (string-right-trim "/" physical) "/")))
+  (sb-posix:setenv "PWD" logical 1)
+  logical)
 
 (defun change-directory (target)
-  (let* ((old (or (ignore-errors (sb-posix:getcwd)) "/"))
+  (let* ((old (or (getenv "PWD") (ignore-errors (sb-posix:getcwd)) "/"))
          (dest (cond
                  ((null target) (or (getenv "HOME") "/"))
                  ((string= target "-")
                   (or (getenv "OLDPWD")
                       (progn (format *error-output* "cd: OLDPWD not set~%")
                              (return-from change-directory 1))))
-                 (t (expand-tilde target)))))
+                 (t (expand-tilde target))))
+         (logical (logical-path dest)))
     (handler-case
         (progn
-          (update-cwd dest)
+          ;; chdir to the logical path; fall back to the raw target if that
+          ;; textual path does not exist (symlinked ..).
+          (handler-case (sb-posix:chdir logical)
+            (sb-posix:syscall-error () (sb-posix:chdir dest)
+              (setf logical (sb-posix:getcwd))))
+          (update-cwd logical (sb-posix:getcwd))
           (sb-posix:setenv "OLDPWD" old 1)
           (when (and target (string= target "-"))
-            (format t "~A~%" (sb-posix:getcwd)))
-          (run-cd-hooks (sb-posix:getcwd))
+            (format t "~A~%" logical))
+          (run-cd-hooks logical)
           0)
       (sb-posix:syscall-error ()
         (format *error-output* "cd: ~A: No such file or directory~%" dest)
@@ -71,7 +95,9 @@ Names containing a slash are returned as-is if they exist."
   (change-directory (first args)))
 
 (define-builtin "pwd" (args)
-  (format t "~A~%" (sb-posix:getcwd))
+  (if (and args (string= (first args) "-P"))
+      (format t "~A~%" (sb-posix:getcwd))               ; physical
+      (format t "~A~%" (or (getenv "PWD") (sb-posix:getcwd))))  ; logical
   0)
 
 (define-builtin "exit" (args)

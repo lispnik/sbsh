@@ -25,8 +25,8 @@
     (subseq name 0 (or (position #\. name) (length name)))))
 
 (defun pretty-cwd ()
-  "Current directory with $HOME abbreviated to ~."
-  (let ((cwd (or (ignore-errors (sb-posix:getcwd)) "?"))
+  "Current directory (logical $PWD) with $HOME abbreviated to ~."
+  (let ((cwd (or (getenv "PWD") (ignore-errors (sb-posix:getcwd)) "?"))
         (home (getenv "HOME")))
     (if (and home (starts-with-subseq home cwd))
         (concatenate 'string "~" (subseq cwd (length home)))
