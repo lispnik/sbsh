@@ -375,7 +375,15 @@ at end of input (a final line with no newline still assigns)."
         (progn (format *error-output* "[: integer expression expected~%") 2))))
 
 (defun test-binary-op-p (op)
-  (member op '("=" "==" "!=" "-eq" "-ne" "-lt" "-le" "-gt" "-ge") :test #'string=))
+  (member op '("=" "==" "!=" "-eq" "-ne" "-lt" "-le" "-gt" "-ge"
+               "-nt" "-ot" "-ef")
+          :test #'string=))
+
+(defun file-stat (path) (ignore-errors (sb-posix:stat path)))
+(defun file-lstat (path) (ignore-errors (sb-posix:lstat path)))
+(defun mode-type= (path type-bits &optional lstat)
+  (let ((s (if lstat (file-lstat path) (file-stat path))))
+    (and s (= (logand (sb-posix:stat-mode s) #o170000) type-bits))))
 
 (defun test-binary (a op b)
   (cond
@@ -387,6 +395,16 @@ at end of input (a final line with no newline still assigns)."
     ((string= op "-le") (test-int a op b #'<=))
     ((string= op "-gt") (test-int a op b #'>))
     ((string= op "-ge") (test-int a op b #'>=))
+    ((string= op "-nt")                       ; a newer than b
+     (let ((sa (file-stat a)) (sb (file-stat b)))
+       (if (and sa (or (null sb) (> (sb-posix:stat-mtime sa) (sb-posix:stat-mtime sb)))) 0 1)))
+    ((string= op "-ot")                       ; a older than b
+     (let ((sa (file-stat a)) (sb (file-stat b)))
+       (if (and sb (or (null sa) (< (sb-posix:stat-mtime sa) (sb-posix:stat-mtime sb)))) 0 1)))
+    ((string= op "-ef")                       ; same device + inode
+     (let ((sa (file-stat a)) (sb (file-stat b)))
+       (if (and sa sb (= (sb-posix:stat-dev sa) (sb-posix:stat-dev sb))
+                (= (sb-posix:stat-ino sa) (sb-posix:stat-ino sb))) 0 1)))
     (t (format *error-output* "[: ~A: unknown operator~%" op) 2)))
 
 (defun test-unary (op a)
@@ -398,6 +416,11 @@ at end of input (a final line with no newline still assigns)."
       ((string= op "-f") (b (test-regular-p a)))
       ((string= op "-d") (b (test-dir-p a)))
       ((string= op "-s") (b (test-nonempty-p a)))
+      ((member op '("-L" "-h") :test #'string=) (b (mode-type= a #o120000 t))) ; symlink
+      ((string= op "-p") (b (mode-type= a #o010000)))     ; fifo
+      ((string= op "-S") (b (mode-type= a #o140000)))     ; socket
+      ((string= op "-b") (b (mode-type= a #o060000)))     ; block device
+      ((string= op "-c") (b (mode-type= a #o020000)))     ; char device
       ((member op '("-r" "-w" "-x") :test #'string=) (b (file-exists-p a)))
       (t (format *error-output* "[: ~A: unary operator expected~%" op) 2))))
 

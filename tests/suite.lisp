@@ -559,6 +559,25 @@ two
   (is (equal '("a" "" "b") (sbsh::ifs-split "a::b" ":")))
   (is (equal '() (sbsh::ifs-split "   " " "))))
 
+(test test-file-operators
+  (is (= 0 (sbsh::shell-test '("-e" "/etc/hosts"))))
+  (is (= 0 (sbsh::shell-test '("-f" "/etc/hosts"))))
+  (is (= 1 (sbsh::shell-test '("-L" "/etc/hosts"))))       ; not a symlink
+  (is (= 0 (sbsh::shell-test '("/etc/hosts" "-ef" "/etc/hosts"))))  ; same inode
+  (is (= 1 (sbsh::shell-test '("/etc/hosts" "-ef" "/etc/passwd"))))
+  (is (= 0 (sbsh::shell-test '("/nonexistent-a" "-ot" "/etc/hosts")))))  ; missing = older
+
+(test param-count-and-substring
+  (let ((sbsh::*positional* '("a" "b" "c" "d")))
+    (is (equal '("4") (sbsh::expand-words (sbsh::tokenize "${#@}"))))
+    (is (equal '("4") (sbsh::expand-words (sbsh::tokenize "${#*}")))))
+  (sb-posix:setenv "SBSH_SS" "abcdef" 1)
+  (flet ((e (s) (first (sbsh::expand-words (sbsh::tokenize s)))))
+    (is (string= "ef" (e "${SBSH_SS: -2}")))       ; negative offset (space)
+    (is (string= "ef" (e "${SBSH_SS:(-2)}")))      ; parenthesized negative
+    (is (string= "cdef" (e "${SBSH_SS:2}"))))
+  (sb-posix:unsetenv "SBSH_SS"))
+
 (test test-and-or-operators
   (is (= 0 (sbsh::shell-test '("1" "-eq" "1" "-a" "2" "-eq" "2"))))
   (is (= 1 (sbsh::shell-test '("1" "-eq" "1" "-a" "2" "-eq" "3"))))

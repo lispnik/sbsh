@@ -102,11 +102,18 @@ shortest match unless LONGEST."
                    (setf i (+ pos pl))
                    (unless all (write-string (subseq val i) out) (return))))))))))
 
+(defun strip-parens (s)
+  "Remove one layer of surrounding parentheses from S (for ${x:(-2)})."
+  (let ((s (string-trim '(#\Space) s)))
+    (if (and (>= (length s) 2) (char= (char s 0) #\() (char= (char s (1- (length s))) #\)))
+        (subseq s 1 (1- (length s)))
+        s)))
+
 (defun substring-of (val spec)
   "Return the ${var:offset[:length]} substring of VAL; SPEC is the text after
 the colon."
   (let* ((c (position #\: spec))
-         (off (or (parse-integer (if c (subseq spec 0 c) spec) :junk-allowed t) 0))
+         (off (or (parse-integer (strip-parens (if c (subseq spec 0 c) spec)) :junk-allowed t) 0))
          (len (and c (parse-integer (subseq spec (1+ c)) :junk-allowed t)))
          (n (length val))
          (start (min n (max 0 (if (minusp off) (+ n off) off))))
@@ -127,6 +134,9 @@ prefix/suffix removal (# ## % %%), replacement (/ //), and substrings (:off:len)
   (cond
     ((zerop (length content)) "")
     ((string= content "#") (var-value "#"))
+    ;; ${#@} / ${#*} -> number of positional parameters
+    ((or (string= content "#@") (string= content "#*"))
+     (princ-to-string (length *positional*)))
     ;; ${#name} length (but not ${#} which is above, nor ${#var...ops})
     ((and (char= (char content 0) #\#) (> (length content) 1)
           (let ((c1 (char content 1))) (or (var-name-char-p c1) (member c1 '(#\@ #\*)))))
