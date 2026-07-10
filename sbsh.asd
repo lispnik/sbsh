@@ -6,7 +6,7 @@
   :description "sbsh: a Unix shell in Common Lisp with pipelines, job control, and history."
   :author "burnsidemk@gmail.com"
   :license "MIT"
-  :version "0.1.1"
+  :version "0.1.2"
   :depends-on ((:require #:sb-posix))
   :serial t
   :components ((:module "src"
