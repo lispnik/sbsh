@@ -71,3 +71,10 @@
 
 (defvar *line-commands* nil
   "Accumulates command descriptors of the current line, for history records.")
+
+(defvar *heredoc-bodies* nil
+  "Ordered heredoc bodies collected by the reader for the current line; each
+<< redirection pops the next one during parsing.")
+
+(defvar *heredoc-temps* nil
+  "Temp files materialized for heredocs this line, deleted as a backstop.")

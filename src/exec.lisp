@@ -42,6 +42,11 @@ controlling terminal, and ignore job-control signals."
 (defun open-redir-file (type file)
   (ecase type
     (:in (sb-posix:open file sb-posix:o-rdonly))
+    ;; A heredoc/here-string temp file: open for reading, then unlink it right
+    ;; away -- the open fd keeps the data alive and no cleanup is needed.
+    (:heredoc (let ((fd (sb-posix:open file sb-posix:o-rdonly)))
+                (ignore-errors (delete-file file))
+                fd))
     (:out (sb-posix:open file
                          (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-trunc)
                          #o644))
@@ -325,16 +330,22 @@ the interactive correction menu (innermost handler) and otherwise fails 127."
 
 ;;; --- Top-level entry ----------------------------------------------------
 
-(defun execute-line (line)
-  "Parse and execute a full command line, recording a history entry.  Errors
+(defun execute-line (line &optional bodies)
+  "Parse and execute a full command line, recording a history entry.  BODIES is
+the ordered list of heredoc bodies the reader collected for this line.  Errors
 are handled per clause in RUN-CLAUSE; this is just a last-resort guard."
-  (let ((*line-commands* '()))
-    (prog1
-        (handler-case (run-command-line line)
-          (shell-error (c)
-            (format *error-output* "sbsh: ~A~%" c)
-            (setf *last-status* 1)))
-      (record-history-line line))))
+  (let ((*line-commands* '())
+        (*heredoc-bodies* bodies)
+        (*heredoc-temps* '()))
+    (unwind-protect
+         (prog1
+             (handler-case (run-command-line line)
+               (shell-error (c)
+                 (format *error-output* "sbsh: ~A~%" c)
+                 (setf *last-status* 1)))
+           (record-history-line line))
+      ;; Backstop: remove any heredoc temp files not already unlinked on open.
+      (dolist (p *heredoc-temps*) (ignore-errors (delete-file p))))))
 
 ;;; --- Command resolution and "did you mean?" suggestions -----------------
 
@@ -451,6 +462,14 @@ write the result to stdout."
 
 (defun temp-file ()
   (format nil "/tmp/sbsh-sub-~D-~D" (sb-posix:getpid) (incf *tmp-counter*)))
+
+(defun write-heredoc-temp (content)
+  "Write CONTENT to a fresh temp file and return its path."
+  (let ((path (temp-file)))
+    (with-open-file (out path :direction :output :if-exists :supersede
+                              :if-does-not-exist :create :external-format :utf-8)
+      (write-string content out))
+    path))
 
 (defun command-substitute (body)
   "Value of a $(...) substitution.  A leading ( is evaluated as Lisp; anything

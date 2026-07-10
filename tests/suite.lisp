@@ -276,6 +276,49 @@
     (sbsh::execute-line "nosuchcmd_zzz && echo no")
     (is (= 127 sbsh::*last-status*))))      ; && short-circuited, stayed 127
 
+(test heredoc-delimiter-reading
+  (multiple-value-bind (d q i) (sbsh::read-heredoc-delimiter "EOF rest" 0)
+    (is (string= "EOF" d)) (is (null q)) (is (= 3 i)))
+  (multiple-value-bind (d q) (sbsh::read-heredoc-delimiter "'EOF'" 0)
+    (is (string= "EOF" d)) (is-true q))
+  (multiple-value-bind (d q) (sbsh::read-heredoc-delimiter "\"END\"" 0)
+    (is (string= "END" d)) (is-true q)))
+
+(test heredoc-scanning
+  (is (equal '(("EOF" . nil)) (sbsh::scan-heredocs "cat <<EOF")))
+  (is (equal '(("END" . t))   (sbsh::scan-heredocs "cat <<-END")))
+  (is (equal '(("A" . nil) ("B" . nil)) (sbsh::scan-heredocs "cat <<A <<B")))
+  ;; <<< is a here-string, not a heredoc; << inside quotes does not count
+  (is (null (sbsh::scan-heredocs "cat <<< word")))
+  (is (null (sbsh::scan-heredocs "echo '<<EOF'"))))
+
+(test heredoc-body-collection
+  ;; Two heredocs, bodies read in order until their delimiters.
+  (let ((lines (list "one" "two" "A" "three" "B" "leftover")))
+    (is (equal '("one
+two
+" "three
+")
+               (sbsh::collect-heredoc-bodies
+                "cat <<A <<B"
+                (lambda (delim) (declare (ignore delim))
+                  (if lines (pop lines) :eof)))))))
+
+(test heredoc-dedent
+  ;; <<- strips leading tabs from body lines and the terminator.
+  (let ((lines (list (format nil "~Cindented" #\Tab) "END")))
+    (is (equal '("indented
+")
+               (sbsh::collect-heredoc-bodies
+                "cat <<-END"
+                (lambda (delim) (declare (ignore delim))
+                  (if lines (pop lines) :eof)))))))
+
+(test heredoc-body-expansion
+  (sb-posix:setenv "SBSH_HD" "xyz" 1)
+  (is (string= "val xyz done" (sbsh::expand-heredoc-body "val $SBSH_HD done")))
+  (is (string= "$SBSH_HD kept" (sbsh::expand-heredoc-body "\\$SBSH_HD kept"))))
+
 (test balanced-parens-reader
   (multiple-value-bind (inner after) (sbsh::read-balanced-parens "(a (b) c)xyz" 0)
     (is (string= "a (b) c" inner))

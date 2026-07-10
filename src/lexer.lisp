@@ -198,6 +198,43 @@ Returns (values VALUE INDEX-AFTER)."
          (values (var-value (subseq string i end)) end)))
       (t (values "$" i)))))
 
+(defun read-heredoc-delimiter (string j)
+  "Read a heredoc delimiter word starting at J (may be '..'/\"..\" quoted).
+Returns (values DELIM QUOTED-P INDEX-AFTER)."
+  (let ((n (length string)))
+    (cond
+      ((>= j n) (values "" nil j))
+      ((or (char= (char string j) #\') (char= (char string j) #\"))
+       (let* ((quote (char string j))
+              (end (position quote string :start (1+ j))))
+         (if end
+             (values (subseq string (1+ j) end) t (1+ end))
+             (values (subseq string (1+ j)) t n))))
+      (t (let ((end (or (position-if
+                         (lambda (c) (member c '(#\Space #\Tab #\Newline #\Return
+                                                 #\< #\> #\| #\& #\; #\( #\))))
+                         string :start j)
+                        n)))
+           (values (subseq string j end) nil end))))))
+
+(defun expand-heredoc-body (body)
+  "Expand $VAR/${VAR}/$(...) and \\$ \\` \\\\ escapes in an unquoted heredoc
+BODY.  No word-splitting or globbing (single and double quotes are literal)."
+  (with-output-to-string (out)
+    (let ((i 0) (n (length body)))
+      (loop while (< i n) do
+        (let ((c (char body i)))
+          (cond
+            ((char= c #\\)
+             (let ((next (and (< (1+ i) n) (char body (1+ i)))))
+               (if (member next '(#\$ #\` #\\))
+                   (progn (write-char next out) (incf i 2))
+                   (progn (write-char c out) (incf i)))))
+            ((char= c #\$)
+             (multiple-value-bind (val ni) (read-variable body (1+ i))
+               (write-string val out) (setf i ni)))
+            (t (write-char c out) (incf i))))))))
+
 (defun tokenize (string)
   "Split STRING into a list of WORD structs and operator/redirection tokens.
 Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
@@ -247,7 +284,23 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
              (let ((fd (digits-or nil (pending))))
                (when (and cur fd) (setf cur nil quoted nil))
                (flush)
-               (push (list :redir :in (or fd 0)) tokens) (incf i)))
+               (cond
+                 ;; <<< here-string: the following word is the (expanded) input.
+                 ((and (eql (peek 1) #\<) (eql (peek 2) #\<))
+                  (push (list :redir :herestring (or fd 0)) tokens) (incf i 3))
+                 ;; << or <<- heredoc: the delimiter is consumed here (the body
+                 ;; was already collected by the reader); QUOTED drives whether
+                 ;; the body is expanded.
+                 ((eql (peek 1) #\<)
+                  (let ((j (+ i 2)) (strip nil))
+                    (when (and (< j n) (char= (char string j) #\-)) (setf strip t) (incf j))
+                    (loop while (and (< j n) (member (char string j) '(#\Space #\Tab)))
+                          do (incf j))
+                    (multiple-value-bind (delim quoted nj) (read-heredoc-delimiter string j)
+                      (declare (ignore delim))
+                      (push (list :redir :heredoc (or fd 0) quoted strip) tokens)
+                      (setf i nj))))
+                 (t (push (list :redir :in (or fd 0)) tokens) (incf i)))))
             ((char= c #\>)
              (let ((fd (digits-or nil (pending))))
                (when (and cur fd) (setf cur nil quoted nil))

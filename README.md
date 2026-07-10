@@ -21,8 +21,9 @@ HELLO
 
 - **Pipelines** — `a | b | c`, each stage its own process, wired together with
   `pipe(2)` / `dup2(2)`.
-- **Redirections** — `<`, `>`, `>>`, `2>`, `2>>`, and fd duplication such as
-  `2>&1`.
+- **Redirections** — `<`, `>`, `>>`, `2>`, `2>>`, fd duplication such as
+  `2>&1`, here-documents (`<<EOF`, `<<-EOF` with tab-stripping, `<<'EOF'` for a
+  literal body), and here-strings (`<<<`).
 - **Operators** — `&&`, `||`, `;`, and background `&`.
 - **Job control** — every pipeline runs in its own process group; the shell
   hands the terminal to the foreground group with `tcsetpgrp(3)` and reclaims
@@ -209,9 +210,7 @@ tests/
 
 ## Notes / limitations
 
-- No here-documents `<<` yet (line continuation and multi-line quotes/parens
-  work; heredocs build on the same continuation-reading primitive).  Command
-  substitution `$(…)` is supported (shell and Lisp), but not backticks.
+- Command substitution `$(…)` is supported (shell and Lisp), but not backticks.
 - Aliases are word-level (no embedded pipes/operators).
 - `echo` is POSIX-style (supports `-n`, not `-e`).
 - Globbing follows the usual dotfile rule (a leading `.` must be matched

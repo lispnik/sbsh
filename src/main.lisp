@@ -9,18 +9,28 @@
   (format t "  -v, --version Show version~%")
   (format t "  FILE         Read and execute commands from FILE~%"))
 
+(defun run-lines (next-line-fn)
+  "Read and execute logical commands (joining continuations and heredoc bodies)
+using NEXT-LINE-FN, a function returning the next physical line or :EOF."
+  (loop
+    (let ((cmd (read-logical-command
+                (lambda (context) (declare (ignore context)) (funcall next-line-fn)))))
+      (when (or (eq cmd :eof) *should-exit*) (return))
+      (when (logical-line-p cmd)
+        (execute-line (logical-line-text cmd) (logical-line-bodies cmd))))))
+
 (defun run-script-file (path)
-  "Execute the script at PATH non-interactively, joining continued lines."
+  "Execute the script at PATH non-interactively, joining continued lines and
+gathering heredoc bodies."
   (setf *interactive* nil)
   (with-open-file (in path :external-format :utf-8)
-    (loop for raw = (read-line in nil :eof)
-          until (or (eq raw :eof) *should-exit*)
-          do (let ((line (assemble-logical-line
-                          raw (lambda (reason)
-                                (declare (ignore reason))
-                                (read-line in nil :eof)))))
-               (execute-line line))))
+    (run-lines (lambda () (read-line in nil :eof))))
   (or *should-exit* *last-status*))
+
+(defun run-command-string (string)
+  "Execute STRING (the -c argument) as a mini-script so heredocs work."
+  (let ((lines (split-on-char string #\Newline)))
+    (run-lines (lambda () (if lines (pop lines) :eof)))))
 
 (defun main ()
   "Program entry point; dispatches between -c, script, and interactive use."
@@ -36,7 +46,7 @@
            (sb-ext:exit :code 0))
           ((string= (first args) "-c")
            (setf *interactive* nil)
-           (when (second args) (execute-line (second args)))
+           (when (second args) (run-command-string (second args)))
            (sb-ext:exit :code (or *should-exit* *last-status*)))
           (t
            (sb-ext:exit :code (run-script-file (first args)))))

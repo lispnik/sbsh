@@ -52,15 +52,15 @@ plain read-line).  Returns a string, :EOF, or :CANCEL."
       ""))
 
 (defun read-command ()
-  "Read one logical command line, continuing across physical lines while the
-input is incomplete (open quote/paren, trailing backslash, or dangling
-operator).  Returns a string, :EOF, or :CANCEL."
-  (let ((first (read-raw-line (format-prompt))))
-    (if (stringp first)
-        (assemble-logical-line
-         first
-         (lambda (reason) (read-raw-line (continuation-prompt reason))))
-        first)))
+  "Read one logical command, continuing across physical lines while incomplete
+(open quote/paren, trailing backslash, dangling operator) and gathering any
+heredoc bodies.  Returns a LOGICAL-LINE, :EOF, or :CANCEL."
+  (read-logical-command
+   (lambda (context)
+     (read-raw-line
+      (cond ((eq context :first) (format-prompt))
+            ((stringp context) "> ")               ; a heredoc body line
+            (t (continuation-prompt context)))))))
 
 (defun run-shell ()
   "Main interactive loop.  Returns the shell's exit code."
@@ -73,14 +73,16 @@ operator).  Returns a string, :EOF, or :CANCEL."
     ;; Report background jobs that changed state.
     (reap-children)
     (notify-finished-jobs)
-    (let ((line (read-command)))
+    (let ((cmd (read-command)))
       (cond
-        ((eq line :eof)
+        ((eq cmd :eof)
          (when *interactive* (format t "exit~%"))
          (return (or *should-exit* *last-status*)))
-        ((eq line :cancel)
+        ((eq cmd :cancel)
          (setf *last-status* 130))         ; 128 + SIGINT
-        ((and (stringp line) (plusp (length (string-trim '(#\Space #\Tab) line))))
-         (history-add line)
-         (execute-line line))
+        ((logical-line-p cmd)
+         (let ((text (logical-line-text cmd)))
+           (when (plusp (length (string-trim '(#\Space #\Tab #\Newline) text)))
+             (history-add text)
+             (execute-line text (logical-line-bodies cmd)))))
         (t nil)))))
