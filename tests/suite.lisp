@@ -358,6 +358,47 @@ two
   (is (null (sbsh::incomplete-reason "{ echo a; }")))
   (is (null (sbsh::incomplete-reason "echo ${HOME}"))))   ; ${...} is not a group
 
+(test compound-detection
+  (is-true  (sbsh::compound-stage-p "if x; then y; fi"))
+  (is-true  (sbsh::compound-stage-p "while c; do b; done"))
+  (is-true  (sbsh::compound-stage-p "for x in a b; do y; done"))
+  (is-true  (sbsh::compound-stage-p "case $x in a) b;; esac"))
+  (is-false (sbsh::compound-stage-p "echo hi"))
+  (is-false (sbsh::compound-stage-p "iffy"))          ; not the keyword `if`
+  (is-false (sbsh::compound-stage-p "echo if")))
+
+(test compound-completeness
+  (is (eq :compound (sbsh::incomplete-reason "if true; then")))
+  (is (eq :compound (sbsh::incomplete-reason "while c; do echo x")))
+  (is (eq :compound (sbsh::incomplete-reason "for x in a b c")))
+  (is (null (sbsh::incomplete-reason "if true; then echo hi; fi")))
+  (is (null (sbsh::incomplete-reason "for x in a; do echo $x; done"))))
+
+(test compound-not-split-by-clauses
+  ;; ; inside a compound must not split it into top-level clauses
+  (is (= 1 (length (sbsh::split-clauses "if a; then b; fi"))))
+  (is (= 2 (length (sbsh::split-clauses "if a; then b; fi; echo c"))))
+  ;; nested compound
+  (is (= 1 (length (sbsh::split-clauses
+                    "for x in 1 2; do if [ $x -eq 1 ]; then echo one; fi; done")))))
+
+(test keyword-scanning
+  (multiple-value-bind (w s e) (sbsh::scan-to-keyword "cond; then body; fi" 0 '("then"))
+    (declare (ignore e))
+    (is (string= "then" w))
+    (is (= 6 s)))
+  ;; `in` is found after the (non-command-position) case word
+  (multiple-value-bind (w s) (sbsh::scan-to-keyword "cat in dog) x;;" 0 '("in"))
+    (declare (ignore s))
+    (is (string= "in" w))))
+
+(test case-clause-splitting
+  (let ((clauses (sbsh::split-case-clauses " cat|dog) echo pet ;; *) echo other ;; ")))
+    (is (= 2 (length clauses)))
+    (is (equal '("cat" "dog") (car (first clauses))))
+    (is (search "echo pet" (cdr (first clauses))))
+    (is (equal '("*") (car (second clauses))))))
+
 (test balanced-parens-reader
   (multiple-value-bind (inner after) (sbsh::read-balanced-parens "(a (b) c)xyz" 0)
     (is (string= "a (b) c" inner))

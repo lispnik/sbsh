@@ -49,6 +49,65 @@ multiple lines so it is safe on continued (multi-line) input."
                (incf i))))))
     (get-output-stream-string out)))
 
+;;; --- Compound-command (if/while/for/case) scanning ----------------------
+
+(defparameter *compound-openers* '("if" "while" "until" "for" "case"))
+(defparameter *compound-closers* '("fi" "done" "esac"))
+(defparameter *compound-continue-words* '("then" "do" "else" "elif" "in"))
+
+(defun structural-char-p (c)
+  (member c '(#\Space #\Tab #\Newline #\Return #\; #\& #\| #\< #\> #\( #\) #\' #\" #\` #\$ #\{ #\})))
+
+(defun read-bareword (string i)
+  "Read an unquoted word starting at I; returns (values TEXT INDEX-AFTER)."
+  (let ((n (length string)) (start i))
+    (loop while (and (< i n) (not (structural-char-p (char string i)))) do (incf i))
+    (values (subseq string start i) i)))
+
+(defun classify-compound-word (word)
+  (cond ((member word *compound-openers* :test #'string=) :open)
+        ((member word *compound-closers* :test #'string=) :close)
+        (t nil)))
+
+(defun compound-depth-map (string)
+  "Return (values DEEP FINAL-DEPTH): DEEP is a bit-vector marking chars that
+lie inside an if/while/for/case compound; FINAL-DEPTH is the unclosed depth."
+  (let* ((n (length string))
+         (deep (make-array (max 1 n) :element-type 'bit :initial-element 0))
+         (i 0) (q nil) (cmdpos t) (compound 0))
+    (labels ((mark (j) (when (< j n) (setf (aref deep j) (if (plusp compound) 1 0)))))
+      (loop while (< i n) do
+        (let ((c (char string i)))
+          (cond
+            (q (mark i) (when (char= c q) (setf q nil)) (incf i))
+            ((char= c #\\) (mark i) (incf i) (when (< i n) (mark i) (incf i)))
+            ((or (char= c #\') (char= c #\")) (mark i) (setf q c) (incf i) (setf cmdpos nil))
+            ((member c '(#\Space #\Tab)) (mark i) (incf i))
+            ((member c '(#\Newline #\; #\& #\| #\()) (mark i) (incf i) (setf cmdpos t))
+            ((char= c #\)) (mark i) (incf i) (setf cmdpos nil))
+            ((and cmdpos (alpha-char-p c))
+             (multiple-value-bind (word nexti) (read-bareword string i)
+               (let ((cls (classify-compound-word word)))
+                 (when (eq cls :open) (incf compound))
+                 (loop for k from i below nexti do (mark k))
+                 (when (eq cls :close) (when (plusp compound) (decf compound)))
+                 (setf i nexti)
+                 (setf cmdpos (and (member word *compound-continue-words* :test #'string=) t)))))
+            (t (mark i) (incf i) (setf cmdpos nil))))))
+    (values deep compound)))
+
+(defun final-compound-depth (string)
+  (nth-value 1 (compound-depth-map string)))
+
+(defun compound-stage-p (string)
+  "True if STRING begins (as a bareword in command position) with a compound
+keyword like if/while/for/case."
+  (let ((s (string-left-trim '(#\Space #\Tab #\Newline #\Return) string)))
+    (multiple-value-bind (word end) (read-bareword s 0)
+      (and (eq :open (classify-compound-word word))
+           (or (= end (length s))
+               (member (char s end) '(#\Space #\Tab #\Newline #\Return #\()))))))
+
 ;;; --- Input completeness / multi-line continuation -----------------------
 
 (defun incomplete-reason (raw)
@@ -84,6 +143,7 @@ form), :BACKSLASH (trailing line-continuation), or :OPERATOR (dangling | && ||).
       (q :quote)
       ((plusp depth) :paren)
       ((plusp brace) :brace)
+      ((plusp (final-compound-depth string)) :compound)  ; unterminated if/while/for/case
       (trailing-bs :backslash)
       ((let ((s (string-right-trim '(#\Space #\Tab #\Newline #\Return) string)))
          (and (plusp (length s))
@@ -188,6 +248,7 @@ heredoc body) returning a string / :EOF / :CANCEL.  Returns a LOGICAL-LINE, or
   "Split STRING into a list of (:TEXT seg :TERMINATOR op) plists at top-level
 control operators, honoring quotes.  OP is one of :SEMI :AMP :AND :OR or NIL."
   (let* ((string (strip-comment raw-string))
+         (deep (compound-depth-map string))
          (clauses '()) (start 0) (i 0) (n (length string)) (q nil) (depth 0)
          (brace 0) (boundary t))
     (flet ((emit (end term consumed)
@@ -196,6 +257,8 @@ control operators, honoring quotes.  OP is one of :SEMI :AMP :AND :OR or NIL."
       (loop while (< i n) do
         (let ((c (char string i)))
           (cond
+            ;; Inside an if/while/for/case compound: nothing here separates.
+            ((= 1 (sbit deep i)) (incf i) (setf boundary nil))
             (q (when (char= c q) (setf q nil)) (incf i) (setf boundary nil))
             ((char= c #\\) (incf i 2) (setf boundary nil))
             ((or (char= c #\') (char= c #\")) (setf q c) (incf i) (setf boundary nil))
@@ -244,10 +307,11 @@ control operators, honoring quotes.  OP is one of :SEMI :AMP :AND :OR or NIL."
   "Split a clause segment into raw stage strings at top-level | (respecting
 quotes and parens, so Lisp forms and $(...) are not split)."
   (let ((stages '()) (start 0) (i 0) (n (length string)) (q nil) (depth 0)
-        (brace 0) (boundary t))
+        (brace 0) (boundary t) (deep (compound-depth-map string)))
     (loop while (< i n) do
       (let ((c (char string i)))
         (cond
+          ((= 1 (sbit deep i)) (incf i))   ; inside a compound: | does not split
           (q (when (char= c q) (setf q nil)) (incf i) (setf boundary nil))
           ((char= c #\\) (incf i 2) (setf boundary nil))
           ((or (char= c #\') (char= c #\")) (setf q c) (incf i) (setf boundary nil))
@@ -277,6 +341,9 @@ quotes and parens, so Lisp forms and $(...) are not split)."
     ((lisp-stage-p string)
      (make-command :lisp (let ((*package* *user-package*))
                            (read-from-string string))))
+    ((compound-stage-p string)
+     (make-command :special (list :compound
+                                  (string-trim '(#\Space #\Tab #\Newline #\Return) string))))
     ((parse-brace-group string)
      (make-command :special (list :group (parse-brace-group string))))
     (t (let ((cmd (build-command (tokenize string))))

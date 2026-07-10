@@ -263,7 +263,9 @@ command's ARGV to the remaining words.  Returns nothing."
                (make-shfun :name name :body body :source body))
          (setf *last-status* 0)))
       (:group
-       (run-command-line (first rest))))))
+       (run-command-line (first rest)))
+      (:compound
+       (eval-compound (first rest))))))
 
 (defun call-shell-function (fn args)
   "Invoke shell function FN with ARGS bound as positional parameters.  A

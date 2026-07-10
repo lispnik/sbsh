@@ -23,6 +23,7 @@
                              (:file "jobs")
                              (:file "builtins")
                              (:file "exec")
+                             (:file "grammar")
                              (:file "config")
                              (:file "repl")
                              (:file "main"))))

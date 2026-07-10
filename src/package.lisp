@@ -66,6 +66,9 @@
 (defvar *function-local-restores* '()
   "Thunks that restore variables shadowed by `local`, run on function return.")
 
+(defvar *loop-depth* 0
+  "Current nesting depth of for/while/until loops (enables break/continue).")
+
 (defvar *history-records* (make-array 0 :adjustable t :fill-pointer 0)
   "Structured, queryable history: one HIST-ENTRY per executed line.")
 

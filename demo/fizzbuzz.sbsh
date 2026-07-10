@@ -1,0 +1,16 @@
+#!/usr/bin/env sbsh
+# fizzbuzz.sbsh --- control flow + functions + Lisp arithmetic in sbsh.
+
+fizzbuzz() {
+  local n=1
+  while [ "$n" -le "$1" ]; do
+    if   [ $((mod $n 15)) -eq 0 ]; then echo FizzBuzz
+    elif [ $((mod $n 3))  -eq 0 ]; then echo Fizz
+    elif [ $((mod $n 5))  -eq 0 ]; then echo Buzz
+    else echo "$n"
+    fi
+    n=$((+ $n 1))
+  done
+}
+
+fizzbuzz 15

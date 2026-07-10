@@ -32,6 +32,8 @@ HELLO
 - **History** — persisted to `~/.sbsh_history`, de-duplicated, navigable with
   the Up/Down arrows (or `C-p`/`C-n`) and searchable with `C-r`
   (reverse incremental search).
+- **Arithmetic** is Common Lisp: `$((expt 2 10))`, `$((- $1 1))` — prefix
+  syntax, full numeric tower.
 - **Line editor** — a raw-mode `readline` written from scratch: `C-a`/`C-e`
   (home/end), `C-b`/`C-f` (left/right), `C-k`/`C-u` (kill), `C-w` (kill word),
   `C-l` (clear), arrow keys, Delete, and **Tab filename completion**.
@@ -39,6 +41,13 @@ HELLO
   globbing (`*`, `?`, `[abc]`, `[a-z]`, `[!…]`). Expansion happens at execution
   time, so `false; echo $?` and `export X=1; echo $X` behave correctly on one
   line.
+- **Control flow** — `if`/`elif`/`else`/`fi`, `while`/`until`/`do`/`done`,
+  `for NAME in … / do … done`, `case … in … esac` (with `|` and glob
+  patterns), and `break`/`continue`; arbitrarily nested and usable in
+  pipelines.
+- **Shell functions** — `name() { … }` and `function name { … }`, positional
+  parameters (`$1`, `$@`, `$#`, …), recursion, `return`, `local`, `{ … }`
+  groups.
 - **Multi-line input** — input continues across lines while it is incomplete:
   an open quote, an unbalanced paren (e.g. a multi-line Lisp form), a trailing
   `\`, or a dangling `|`/`&&`/`||`, with a `>` continuation prompt.
