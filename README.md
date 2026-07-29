@@ -21,10 +21,12 @@ HELLO
 
 - **Pipelines** — `a | b | c`, each stage its own process, wired together with
   `pipe(2)` / `dup2(2)`.
-- **Redirections** — `<`, `>`, `>>`, `2>`, `2>>`, fd duplication such as
-  `2>&1`, here-documents (`<<EOF`, `<<-EOF` with tab-stripping, `<<'EOF'` for a
+- **Redirections** — `<`, `>`, `>>`, `2>`, `2>>`, read-write `<>`, noclobber
+  override `>|`, fd duplication (`2>&1`, `<&3`) and fd close (`>&-`, `<&-`),
+  here-documents (`<<EOF`, `<<-EOF` with tab-stripping, `<<'EOF'`/`<<\EOF` for a
   literal body), and here-strings (`<<<`).
-- **Operators** — `&&`, `||`, `;`, and background `&`.
+- **Operators** — `&&`, `||`, `;`, and background `&`; a stray or dangling
+  control operator (`| cmd`, `a && && b`, `;`) is a reported syntax error.
 - **Job control** — every pipeline runs in its own process group; the shell
   hands the terminal to the foreground group with `tcsetpgrp(3)` and reclaims
   it afterwards. `Ctrl-Z` suspends; `jobs`, `fg`, `bg`, and `kill %n` manage
@@ -32,35 +34,40 @@ HELLO
 - **History** — persisted to `~/.sbsh_history`, de-duplicated, navigable with
   the Up/Down arrows (or `C-p`/`C-n`) and searchable with `C-r`
   (reverse incremental search).
-- **Arithmetic** is Common Lisp: `$((expt 2 10))`, `$((- $1 1))` — prefix
-  syntax, full numeric tower.
+- **Arithmetic** — `$((…))` is POSIX integer arithmetic (`$((1 + 2*3))`,
+  `$((n % 4))`, comparisons, `&&`/`||`, bit ops); anything that is not valid
+  POSIX arithmetic falls back to **Common Lisp** with its full numeric tower
+  (`$((expt 2 10))`, `$((- $1 1))`).
 - **Line editor** — a raw-mode `readline` written from scratch: `C-a`/`C-e`
   (home/end), `C-b`/`C-f` (left/right), `C-k`/`C-u` (kill), `C-w` (kill word),
   `C-l` (clear), arrow keys, Delete, and **Tab filename completion**.
-- **Expansion** — variables (`$VAR`, `${VAR}`, `$?`, `$$`, `$@`, `$#`,
-  positional `$1`…); parameter operators `${v:-def}`, `${v:=}`, `${v:+}`,
-  `${#v}`, `${v#pat}`/`${v##pat}`, `${v%pat}`/`${v%%pat}`, `${v/a/b}`/`${v//a/b}`,
-  `${v:off:len}`; tilde (`~`, incl. in assignments); command substitution
-  `$(…)`; and globbing (`*`, `?`, `[abc]`, `[a-z]`, `[!…]`).  Unquoted
-  expansions are **word-split** on `$IFS`; `"$@"` yields one word per parameter.
-  Expansion happens at execution time, so `false; echo $?` behaves correctly.
+- **Expansion** — variables (`$VAR`, `${VAR}`, `$?`, `$$`, `$!`, `$-`, `$@`,
+  `$*`, `$#`, positional `$1`…); parameter operators `${v:-def}`, `${v:=}`,
+  `${v:+}`, `${#v}`, `${v#pat}`/`${v##pat}`, `${v%pat}`/`${v%%pat}`,
+  `${v/a/b}`/`${v//a/b}`, `${v:off:len}`; `$'…'` ANSI-C escapes; tilde (`~`,
+  `~user`, incl. in assignments); command substitution `$(…)`; and globbing
+  (`*`, `?`, `[abc]`, `[a-z]`, `[!…]`, `[[:class:]]`).  Unquoted expansions are
+  **word-split** on `$IFS`; `"$@"` yields one word per parameter and splits
+  correctly even when embedded or adjacent (`"pre$@post"`).  Expansion happens
+  at execution time, so `false; echo $?` behaves correctly.
 - **Control flow** — `if`/`elif`/`else`/`fi`, `while`/`until`/`do`/`done`,
   `for NAME in … / do … done`, `case … in … esac` (with `|` and glob
-  patterns), and `break`/`continue`; arbitrarily nested and usable in
-  pipelines.
+  patterns), and `break`/`continue` (with an optional level, `break 2`);
+  arbitrarily nested and usable in pipelines.
 - **Shell functions** — `name() { … }` and `function name { … }`, positional
   parameters (`$1`, `$@`, `$#`, …), recursion, `return`, `local`, `{ … }`
   groups.
 - **Multi-line input** — input continues across lines while it is incomplete:
   an open quote, an unbalanced paren (e.g. a multi-line Lisp form), a trailing
   `\`, or a dangling `|`/`&&`/`||`, with a `>` continuation prompt.
-- **Shell options** — `set -e` (errexit), `set -u` (nounset),
-  `set -o pipefail`, `set -- args`; `!` pipeline negation; `$PIPESTATUS`
-  (and `${PIPESTATUS[n]}`).
-- **Builtins** — `cd`, `pwd`, `exit`, `echo`, `export`, `unset`, `env`, `set`,
-  `read`, `shift`, `wait`, `test`/`[`, `return`, `local`, `break`, `continue`,
-  `history`, `jobs`, `fg`, `bg`, `kill`, `type`, `help`, `alias`, `unalias`,
-  `snapshot`, `true`, `false`, `:`.
+- **Shell options** — `set -e` (errexit), `set -u` (nounset), `set -x`
+  (xtrace), `set -f` (noglob), `set -C` (noclobber), `set -o pipefail`,
+  `set -- args`; `!` pipeline negation; `$PIPESTATUS` (and `${PIPESTATUS[n]}`).
+- **Builtins** — `cd`, `pwd`, `exit`, `echo`, `export`, `unset`, `readonly`,
+  `env`, `set`, `read`, `shift`, `eval`, `.`/`source`, `exec`, `trap`
+  (EXIT + signals), `wait`, `test`/`[` (with `( )` grouping), `return`,
+  `local`, `break`, `continue`, `history`, `jobs`, `fg`, `bg`, `kill`, `type`,
+  `help`, `alias`, `unalias`, `snapshot`, `true`, `false`, `:`.
 
 ## Common Lisp superpowers
 

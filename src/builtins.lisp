@@ -494,14 +494,20 @@ like INT / TERM (SIG-prefix and numbers accepted)."
                 (when action (ignore-errors (run-command-string action))))))))))
 
 (defun run-exit-trap ()
-  "Run the EXIT trap action, if any (called just before the shell exits)."
+  "Run the EXIT trap action, if any (called just before the shell exits).  The
+shell's exit status is preserved across the trap unless the trap itself calls
+`exit` (POSIX)."
   (let ((action (gethash "EXIT" *traps*)))
     (when action
       (remhash "EXIT" *traps*)            ; run at most once
-      ;; The trap runs even though `exit` set *should-exit*; bind it off so the
-      ;; trap body actually executes, then let the caller exit with its code.
-      (let ((*should-exit* nil))
-        (ignore-errors (run-command-string action))))))
+      (let ((saved *last-status*) (trap-exit nil))
+        ;; Bind *should-exit* off so the trap body actually runs even though we
+        ;; are on our way out; capture whether the trap itself called `exit`.
+        (let ((*should-exit* nil))
+          (ignore-errors (run-command-string action))
+          (setf trap-exit *should-exit*))
+        (setf *last-status* (or trap-exit saved))
+        (when trap-exit (setf *should-exit* trap-exit))))))
 
 (define-builtin "trap" (args)
   (cond

@@ -973,3 +973,16 @@ Shell globals are freshly bound so tests do not leak state into each other."
   (is (string= "INT"  (sbsh::normalize-trap-name "INT")))
   (is (string= "INT"  (sbsh::normalize-trap-name "SIGINT")))
   (is (string= "TERM" (sbsh::normalize-trap-name "sigterm"))))
+
+;;; --- #09 follow-up: EXIT trap preserves the shell's exit status --------
+(test exit-trap-preserves-status
+  (let ((sbsh::*traps* (make-hash-table :test 'equal))
+        (sbsh::*last-status* 1) (sbsh::*should-exit* nil))
+    (setf (gethash "EXIT" sbsh::*traps*) ":")     ; no-op trap
+    (sbsh::run-exit-trap)
+    (is (= 1 sbsh::*last-status*)))               ; status from before the trap
+  (let ((sbsh::*traps* (make-hash-table :test 'equal))
+        (sbsh::*last-status* 0) (sbsh::*should-exit* nil))
+    (setf (gethash "EXIT" sbsh::*traps*) "exit 7") ; trap that exits wins
+    (sbsh::run-exit-trap)
+    (is (eql 7 sbsh::*should-exit*))))
