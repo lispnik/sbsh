@@ -69,7 +69,7 @@ heredoc bodies.  Returns a LOGICAL-LINE, :EOF, or :CANCEL."
   (ignore-errors (load-records))
   (ignore-errors (load-rc-file))
   (loop
-    (when *should-exit* (return *should-exit*))
+    (when *should-exit* (run-exit-trap) (return *should-exit*))
     ;; Report background jobs that changed state.
     (reap-children)
     (notify-finished-jobs)
@@ -77,6 +77,7 @@ heredoc bodies.  Returns a LOGICAL-LINE, :EOF, or :CANCEL."
       (cond
         ((eq cmd :eof)
          (when *interactive* (format t "exit~%"))
+         (run-exit-trap)
          (return (or *should-exit* *last-status*)))
         ((eq cmd :cancel)
          (setf *last-status* 130))         ; 128 + SIGINT

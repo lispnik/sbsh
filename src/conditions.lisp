@@ -7,6 +7,11 @@
   (:report (lambda (c s)
              (format s "~A" (or (shell-error-message c) "shell error")))))
 
+(define-condition expansion-error (shell-error) ()
+  (:documentation "A parameter-expansion failure (${v:?}, set -u on an unset
+variable).  Per POSIX these exit a non-interactive shell, unlike other
+shell-errors such as a redirection failure."))
+
 (define-condition command-not-found (shell-error)
   ((name :initarg :name :reader command-not-found-name)
    (suggestions :initarg :suggestions :initform '()

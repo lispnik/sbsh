@@ -32,6 +32,14 @@ gathering heredoc bodies."
   (let ((lines (split-on-char string #\Newline)))
     (run-lines (lambda () (if lines (pop lines) :eof)))))
 
+(defun install-default-signal-handling ()
+  "Non-interactively, restore the OS default for termination signals so that
+`kill -TERM $$` ends the shell with status 128+signum (POSIX), rather than
+being swallowed by the runtime."
+  (dolist (sig (list sb-posix:sigterm sb-posix:sighup sb-posix:sigquit
+                     sb-posix:sigint sb-posix:sigpipe sb-posix:sigalrm))
+    (ignore-errors (sb-sys:enable-interrupt sig :default))))
+
 (defun main ()
   "Program entry point; dispatches between -c, script, and interactive use."
   (let ((args (rest sb-ext:*posix-argv*)))
@@ -46,10 +54,15 @@ gathering heredoc bodies."
            (sb-ext:exit :code 0))
           ((string= (first args) "-c")
            (setf *interactive* nil)
+           (install-default-signal-handling)
            (when (second args) (run-command-string (second args)))
+           (run-exit-trap)
            (sb-ext:exit :code (or *should-exit* *last-status*)))
           (t
-           (sb-ext:exit :code (run-script-file (first args)))))
+           (install-default-signal-handling)
+           (let ((code (run-script-file (first args))))
+             (run-exit-trap)
+             (sb-ext:exit :code code))))
       (sb-sys:interactive-interrupt ()
         (sb-ext:exit :code 130))
       #+sbcl

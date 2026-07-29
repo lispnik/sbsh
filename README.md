@@ -227,6 +227,14 @@ tests/
 ## Notes / limitations
 
 - Command substitution `$(…)` is supported (shell and Lisp), but not backticks.
+- `(…)` is a **Lisp filter stage**, not a POSIX subshell, so `(cmd)` runs Lisp
+  rather than forking a subshell — this is a deliberate design choice and the
+  reason POSIX subshells are not available.
+- `$((…))` is **POSIX integer arithmetic**; expressions that are not valid POSIX
+  arithmetic fall back to Common Lisp evaluation (e.g. `$((expt 2 10))`).
+- Prefix assignments are not evaluated strictly left-to-right, so a later one
+  cannot see an earlier one on the same command (`a=1 b=$a cmd` sees `b` empty);
+  independent prefix assignments (`LANG=C LC_ALL=C sort`) work as expected.
 - A here-document whose body lies inside a multi-line compound body
   (e.g. a `cat <<EOF` inside a `for … done`) is not collected — heredocs work
   at the top level and in single-line pipelines.

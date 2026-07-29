@@ -35,7 +35,8 @@
   (let ((cmd (first (sbsh::pipeline-commands
                      (sbsh::clause-pipeline (first (sbsh::parse-line "echo hi >|/tmp/y")))))))
     (is (equal '(("echo" "hi")) (list (sbsh::command-argv cmd))))
-    (is (equal '((:out 1 "/tmp/y")) (sbsh::command-redirs cmd)))))
+    ;; >| is a force-truncate redirection (:clobber), distinct from > (#37).
+    (is (equal '((:clobber 1 "/tmp/y")) (sbsh::command-redirs cmd)))))
 
 (test fnmatch-class
   (is-true  (sbsh::fnmatch "[abc]at" "bat"))
@@ -83,7 +84,8 @@
 ;;; --- Expansion ----------------------------------------------------------
 
 (test tilde-expansion
-  (is (string= (namestring (user-homedir-pathname))
+  ;; Bare ~ expands WITHOUT a trailing slash (POSIX / dash / bash), see #47.
+  (is (string= (string-right-trim "/" (namestring (user-homedir-pathname)))
                (sbsh::expand-tilde "~")))
   (is (string= "/etc/passwd" (sbsh::expand-tilde "/etc/passwd"))))
 
@@ -145,7 +147,7 @@
 
 (test tilde-in-argument-words
   ;; Tilde expansion happens in EXPAND-WORDS, at execution time.
-  (let ((home (namestring (user-homedir-pathname))))
+  (let ((home (string-right-trim "/" (namestring (user-homedir-pathname)))))
     (is (equal (list home) (sbsh::expand-words (sbsh::tokenize "~"))))
     ;; A quoted tilde stays literal.
     (is (equal '("~") (sbsh::expand-words (sbsh::tokenize "'~'"))))))
@@ -620,3 +622,354 @@ two
     (is (string= "hello" (sbsh::ed-text ed)))
     (sbsh::ed-delete-back ed)
     (is (string= "helo" (sbsh::ed-text ed)))))
+
+;;; ======================================================================
+;;; Round 10 conformance: audit fixes (crashes, DoS, loop control, guards)
+;;; ======================================================================
+
+(defun run-line (s)
+  "Execute S with the interpreter in-process, returning (values STDOUT STATUS).
+Shell globals are freshly bound so tests do not leak state into each other."
+  (let ((out (make-string-output-stream)))
+    (let ((*standard-output* out)
+          (sbsh::*errexit* nil) (sbsh::*nounset* nil) (sbsh::*pipefail* nil)
+          (sbsh::*should-exit* nil) (sbsh::*loop-depth* 0)
+          (sbsh::*positional* nil) (sbsh::*last-status* 0)
+          (sbsh::*condition-context* nil) (sbsh::*line-commands* nil)
+          (sbsh::*cmdsub-status* nil) (sbsh::*pipestatus* nil))
+      (sbsh::run-command-line s)
+      (values (get-output-stream-string out) sbsh::*last-status*))))
+
+;;; --- #03: unterminated [ must not crash; POSIX treats it literally ------
+(test fnmatch-unterminated-bracket
+  (is-false (sbsh::fnmatch "[a" "a"))       ; would OOB-crash before the fix
+  (is-true  (sbsh::fnmatch "[a" "[a"))      ; literal [a matches itself
+  (is-false (sbsh::fnmatch "[a-" "a"))
+  (is-true  (sbsh::fnmatch "[a-" "[a-"))
+  ;; a properly closed class still works
+  (is-true  (sbsh::fnmatch "[abc]" "b"))
+  (is-false (sbsh::fnmatch "[abc]" "z")))
+
+;;; --- #07: fnmatch must not backtrack exponentially (ReDoS) --------------
+(test fnmatch-no-exponential-backtracking
+  ;; Pattern *a*a*...*b vs a string of all 'a': the classic catastrophic case.
+  ;; With memoization this returns immediately; without it, it hangs forever.
+  (let ((pat (with-output-to-string (s)
+               (dotimes (i 25) (write-string "*a" s))
+               (write-string "*b" s)))
+        (nm (make-string 50 :initial-element #\a)))
+    (is-false (sbsh::fnmatch pat nm)))
+  ;; And a matching variant still succeeds.
+  (is-true (sbsh::fnmatch "*a*a*b" "xaxaxb")))
+
+;;; --- #27 / #31: shift must reject bad counts, never crash --------------
+(test shift-rejects-bad-count
+  (let ((sbsh::*positional* (list "a" "b" "c")))
+    (is (= 1 (sbsh::run-builtin "shift" '("-1"))))      ; was a fatal TYPE-ERROR
+    (is (equal '("a" "b" "c") sbsh::*positional*)))
+  (let ((sbsh::*positional* (list "a" "b" "c")))
+    (is (= 1 (sbsh::run-builtin "shift" '("abc"))))     ; non-numeric
+    (is (equal '("a" "b" "c") sbsh::*positional*)))
+  (let ((sbsh::*positional* (list "a" "b" "c")))
+    (is (= 1 (sbsh::run-builtin "shift" '("9"))))       ; over-shift: no change
+    (is (equal '("a" "b" "c") sbsh::*positional*)))
+  (let ((sbsh::*positional* (list "a" "b" "c")))
+    (is (= 0 (sbsh::run-builtin "shift" '("2"))))
+    (is (equal '("c") sbsh::*positional*))))
+
+;;; --- #30: exit with a non-numeric argument errors (status 2) -----------
+(test exit-nonnumeric-argument
+  (let ((sbsh::*should-exit* nil) (sbsh::*last-status* 0))
+    (is (= 2 (sbsh::run-builtin "exit" '("foo"))))
+    (is (eql 2 sbsh::*should-exit*)))
+  (let ((sbsh::*should-exit* nil) (sbsh::*last-status* 0))
+    (is (= 5 (sbsh::run-builtin "exit" '("5"))))
+    (is (eql 5 sbsh::*should-exit*)))
+  (let ((sbsh::*should-exit* nil) (sbsh::*last-status* 0))
+    (is (= 42 (sbsh::run-builtin "exit" '("298"))))     ; 298 mod 256 = 42
+    (is (eql 42 sbsh::*should-exit*))))
+
+;;; --- #28: integer test operators reject non-integer operands ----------
+(test test-integer-rejects-noninteger
+  (is (= 2 (sbsh::shell-test '("3x" "-eq" "3"))))       ; was silent partial-parse
+  (is (= 2 (sbsh::shell-test '("3" "-eq" "3y"))))
+  (is (= 0 (sbsh::shell-test '("3" "-eq" "3"))))
+  (is (= 0 (sbsh::shell-test '("-5" "-lt" "2"))))
+  (is (= 1 (sbsh::shell-test '("10" "-lt" "2")))))
+
+;;; --- #04: set -e in a while/until body stops the loop (no spin) --------
+(test errexit-breaks-while-loop
+  (multiple-value-bind (out status) (run-line "set -e; while true; do false; echo body; done; echo after")
+    (is (string= "" out))                                ; body/after never printed
+    (is (= 1 status)))                                    ; exits with false's status
+  ;; without errexit, break still terminates the loop normally
+  (multiple-value-bind (out status) (run-line "while true; do echo x; break; done; echo done")
+    (declare (ignore status))
+    (is (string= (format nil "x~%done~%") out))))
+
+;;; --- #25: break N / continue N honor the numeric level ----------------
+(test break-continue-levels
+  (is (string= (format nil "1a~%")
+               (run-line "for i in 1 2 3; do for j in a b; do echo $i$j; break 2; done; done")))
+  ;; break 1 only leaves the inner loop
+  (is (string= (format nil "1a~%2a~%3a~%")
+               (run-line "for i in 1 2 3; do for j in a b; do echo $i$j; break; done; done")))
+  ;; continue 2 skips to the next outer iteration
+  (is (string= ""
+               (run-line "for i in 1 2; do for j in a b; do [ $j = a ] && continue 2; echo $i$j; done; echo end$i; done"))))
+
+;;; ======================================================================
+;;; Round 10 conformance: expansion & globbing
+;;; ======================================================================
+
+;;; --- #01: POSIX arithmetic $((...)), with Lisp fallback preserved ------
+(test eval-arithmetic-direct
+  (is (= 3   (sbsh::eval-arithmetic "1+2")))
+  (is (= 20  (sbsh::eval-arithmetic "(2+3)*4")))
+  (is (= 3   (sbsh::eval-arithmetic "10/3")))
+  (is (= 1   (sbsh::eval-arithmetic "10%3")))
+  (is (= 1   (sbsh::eval-arithmetic "3>2")))
+  (is (= 0   (sbsh::eval-arithmetic "3<2")))
+  (is (= 1   (sbsh::eval-arithmetic "3==3")))
+  (is (= 1   (sbsh::eval-arithmetic "5 && 2")))
+  (is (= 0   (sbsh::eval-arithmetic "0 || 0")))
+  (is (= -1  (sbsh::eval-arithmetic "2-3")))
+  (is (= 255 (sbsh::eval-arithmetic "0xff")))
+  ;; expressions that are NOT valid POSIX arithmetic must signal, so the
+  ;; caller can fall back to Common Lisp evaluation.
+  (signals sbsh::arith-error (sbsh::eval-arithmetic "+ 1 2"))
+  (signals sbsh::arith-error (sbsh::eval-arithmetic "expt 2 10"))
+  (signals sbsh::arith-error (sbsh::eval-arithmetic "1 2")))
+
+(test arithmetic-expansion
+  (flet ((e (s) (first (sbsh::expand-words (sbsh::tokenize s)))))
+    (is (string= "3"  (e "$((1+2))")))
+    (is (string= "14" (e "$((2*(3+4)))")))
+    (is (string= "1"  (e "$((10%3))")))
+    (is (string= "1"  (e "$((3==3))")))
+    (sb-posix:setenv "SBSH_AX" "5" 1)
+    (is (string= "6"  (e "$((SBSH_AX+1))")))     ; bare name -> variable
+    (is (string= "10" (e "$(($SBSH_AX*2))")))    ; $-prefixed variable
+    (sb-posix:unsetenv "SBSH_AX")
+    ;; documented Common Lisp arithmetic still works via fallback
+    (is (string= "1024" (e "$((expt 2 10))")))))
+
+;;; --- #06: set -u must not fire for ${x-w} ${x:-w} ${x+w} etc -----------
+(test nounset-modifiers-suppressed
+  (sb-posix:unsetenv "SBSH_NU")
+  (let ((sbsh::*nounset* t))
+    (flet ((e (s) (first (sbsh::expand-words (sbsh::tokenize s)))))
+      (is (string= "def" (e "${SBSH_NU:-def}")))
+      (is (string= "def" (e "${SBSH_NU-def}")))
+      (is (null (e "${SBSH_NU+set}")))    ; unset + -> empty -> word drops out
+      (sb-posix:setenv "SBSH_NU" "1" 1)
+      (is (string= "yes" (e "${SBSH_NU:+yes}")))
+      (sb-posix:unsetenv "SBSH_NU"))
+    ;; a bare unset expansion still errors under nounset
+    (signals sbsh::shell-error (sbsh::tokenize "$SBSH_NU"))))
+
+;;; --- #47 / #44: tilde forms -------------------------------------------
+(test tilde-expansion-forms
+  (let ((home (sbsh::home-dir)))
+    (is (string= home (sbsh::expand-tilde "~")))            ; no trailing slash
+    (is (string= (concatenate 'string home "/x") (sbsh::expand-tilde "~/x")))
+    (let ((r (sbsh::expand-tilde "~root")))                 ; ~user
+      (is (or (string= r "~root") (char= (char r 0) #\/))))))
+
+;;; --- #18: $'...' ANSI-C quoting ---------------------------------------
+(test ansi-c-quoting
+  (is (string= (format nil "a~Cb" #\Tab)     (sbsh::ansi-c-unescape "a\\tb")))
+  (is (string= (format nil "~C" #\Newline)   (sbsh::ansi-c-unescape "\\n")))
+  (is (string= "'"                           (sbsh::ansi-c-unescape "\\'")))
+  (is (string= "A"                           (sbsh::ansi-c-unescape "\\x41")))
+  (is (string= "A"                           (sbsh::ansi-c-unescape "\\101")))
+  (let ((w (first (remove-if-not #'sbsh::word-p (sbsh::tokenize "$'a\\tb'")))))
+    (is (string= (format nil "a~Cb" #\Tab) (sbsh::word-text w)))
+    (is-true (sbsh::word-quoted w))))          ; quoted: no split/glob
+
+;;; --- #52: $- reflects the current option flags ------------------------
+(test dollar-dash-option-flags
+  (let ((sbsh::*errexit* t) (sbsh::*nounset* t) (sbsh::*xtrace* nil)
+        (sbsh::*noglob* nil) (sbsh::*noclobber* nil))
+    (is (string= "eu" (sbsh::var-value "-"))))
+  (let ((sbsh::*errexit* nil) (sbsh::*nounset* nil) (sbsh::*xtrace* t)
+        (sbsh::*noglob* t) (sbsh::*noclobber* t))
+    (is (string= "xfC" (sbsh::var-value "-")))))
+
+;;; --- #46 / #48: backslash handling ------------------------------------
+(test backslash-newline-in-double-quotes
+  ;; a backslash-newline inside "..." is a line continuation (both removed)
+  (is (string= "line1 line2"
+               (sbsh::word-text
+                (first (sbsh::tokenize (format nil "\"line1 \\~Cline2\"" #\Newline)))))))
+
+(test trailing-backslash-kept
+  ;; a lone trailing backslash is kept literally, not dropped
+  (is (string= "abc\\" (sbsh::word-text (first (sbsh::tokenize "abc\\"))))))
+
+;;; --- #02: an unquoted metachar globs even next to a quoted part --------
+(test quoted-adjacent-glob-flag
+  (flet ((w (s) (first (remove-if-not #'sbsh::word-p (sbsh::tokenize s)))))
+    (is-true  (sbsh::word-has-glob (w "\"a\"*")))   ; "a"*  -> globs
+    (is-true  (sbsh::word-quoted   (w "\"a\"*")))
+    (is-true  (sbsh::word-has-glob (w "*\".c\"")))  ; *".c" -> globs
+    (is-true  (sbsh::word-has-glob (w "f*\"c\"")))  ; f*"c" -> globs
+    (is-true  (sbsh::word-has-glob (w "a\"1\"*")))  ; a"1"* -> globs
+    (is-false (sbsh::word-has-glob (w "\"*\"")))    ; fully quoted -> literal
+    (is-false (sbsh::word-has-glob (w "'*'")))
+    (is-true  (sbsh::word-has-glob (w "*.c")))))
+
+;;; --- #38: set -f (noglob) disables pathname expansion -----------------
+(test noglob-disables-globbing
+  (let ((sbsh::*noglob* t))
+    (is (equal '("*.nope-xyz") (sbsh::expand-words (sbsh::tokenize "*.nope-xyz"))))))
+
+;;; --- #50 / #53: set -o returns failure for an unknown option name -----
+(test set-o-option-semantics
+  (let ((sbsh::*noclobber* nil) (sbsh::*noglob* nil) (sbsh::*xtrace* nil))
+    (is (eq t   (sbsh::set-o-option "noclobber" t)))
+    (is-true sbsh::*noclobber*)
+    (is (eq t   (sbsh::set-o-option "noglob" t)))
+    (is (eq t   (sbsh::set-o-option "xtrace" t)))
+    (is (null   (sbsh::set-o-option "nosuch" t)))))
+
+(test set-invalid-option-status
+  (let ((sbsh::*errexit* nil) (sbsh::*noglob* nil) (sbsh::*positional* nil))
+    (is (= 1 (sbsh::run-builtin "set" '("+o" "nosuch"))))   ; unknown -> 1
+    (is (= 0 (sbsh::run-builtin "set" '("-e"))))
+    (is-true sbsh::*errexit*)
+    (is (= 0 (sbsh::run-builtin "set" '("-f"))))
+    (is-true sbsh::*noglob*)))
+
+;;; ======================================================================
+;;; Round 10 conformance: builtins & options
+;;; ======================================================================
+
+;;; --- #29: test/[ with ( ) grouping, composing with ! -a -o ------------
+(test test-paren-grouping
+  (is (= 0 (sbsh::shell-test '("(" "a" "=" "a" ")"))))
+  (is (= 0 (sbsh::shell-test '("(" "a" "=" "b" "-o" "c" "=" "c" ")"))))
+  (is (= 1 (sbsh::shell-test '("(" "a" "=" "b" ")" "-a" "!" "-z" "x"))))
+  (is (= 0 (sbsh::shell-test '("!" "(" "a" "=" "b" ")"))))
+  ;; -a / -o still compose without parens (regression guard)
+  (is (= 0 (sbsh::shell-test '("1" "-eq" "1" "-a" "2" "-eq" "2"))))
+  (is (= 1 (sbsh::shell-test '("1" "-eq" "1" "-a" "2" "-eq" "3"))))
+  (is (= 0 (sbsh::shell-test '("1" "-eq" "9" "-o" "2" "-eq" "2")))))
+
+;;; --- #32: readonly variables cannot be reassigned ---------------------
+(test readonly-enforced
+  (let ((sbsh::*readonly-vars* (make-hash-table :test 'equal)))
+    (setf (gethash "SBSH_RO" sbsh::*readonly-vars*) t)
+    (sb-posix:setenv "SBSH_RO" "orig" 1)
+    (signals sbsh::shell-error (sbsh::apply-assignment "SBSH_RO=changed"))
+    (is (string= "orig" (sbsh::getenv "SBSH_RO")))
+    (sbsh::apply-assignment "SBSH_RW=ok")          ; non-readonly assigns fine
+    (is (string= "ok" (sbsh::getenv "SBSH_RW")))
+    (sb-posix:unsetenv "SBSH_RO") (sb-posix:unsetenv "SBSH_RW")))
+
+;;; --- #33: 126 (not executable) vs 127 (not found) helper --------------
+(test file-executable-classification
+  (is-true  (sbsh::file-executable-p "/bin/sh"))
+  (is-false (sbsh::file-executable-p "/etc/hosts")))
+
+;;; --- #08: eval runs its argument in the current shell -----------------
+(test eval-runs-in-process
+  (is (string= (format nil "hi~%bye~%") (run-line "eval 'echo hi; echo bye'")))
+  (multiple-value-bind (out status) (run-line "eval 'SBSH_EV=7'; echo $SBSH_EV")
+    (declare (ignore status))
+    (is (string= (format nil "7~%") out)))
+  (sb-posix:unsetenv "SBSH_EV"))
+
+;;; --- #05: set -e must not exit on a !-negated pipeline ----------------
+(test errexit-exempts-negated-pipeline
+  ;; `! true` yields status 1, but negation exempts it from errexit.
+  (multiple-value-bind (out status) (run-line "set -e; ! true; echo survived")
+    (declare (ignore status))
+    (is (string= (format nil "survived~%") out)))
+  ;; a plain failure still triggers errexit (regression guard)
+  (multiple-value-bind (out status) (run-line "set -e; false; echo nope")
+    (declare (ignore status))
+    (is (string= "" out))))
+
+;;; ======================================================================
+;;; Round 10 conformance: parser syntax, fd-dup, $@/$* cluster, read, trap
+;;; ======================================================================
+
+;;; --- #22/#23/#24/#49: syntax errors around control operators ----------
+(test clause-syntax-errors
+  (signals sbsh::shell-parse-error (sbsh::validate-clauses (sbsh::split-clauses ";")))
+  (signals sbsh::shell-parse-error (sbsh::validate-clauses (sbsh::split-clauses "&& echo b")))
+  (signals sbsh::shell-parse-error (sbsh::validate-clauses (sbsh::split-clauses "echo a && && echo b")))
+  (signals sbsh::shell-parse-error (sbsh::validate-clauses (sbsh::split-clauses "echo hi &&")))
+  ;; leading / trailing pipe is an empty stage
+  (signals sbsh::shell-parse-error (sbsh::parse-segment "| echo hi"))
+  (signals sbsh::shell-parse-error (sbsh::parse-segment "echo hi |"))
+  ;; valid lines do NOT error
+  (finishes (sbsh::validate-clauses (sbsh::split-clauses "echo a; echo b")))
+  (finishes (sbsh::validate-clauses (sbsh::split-clauses "echo a && echo b")))
+  (finishes (sbsh::validate-clauses (sbsh::split-clauses (format nil "echo a~%~%echo b")))))
+
+;;; --- #36: function definition with no space after ) -------------------
+(test function-def-no-space
+  (multiple-value-bind (name body) (sbsh::parse-function-def "f(){ echo hi; }")
+    (is (string= "f" name))
+    (is (search "echo hi" body)))
+  ;; the whole definition stays one clause (the inner ; is not a separator)
+  (is (= 2 (length (sbsh::split-clauses "f(){ echo hi; }; f")))))
+
+;;; --- #20/#21/#39/#55: fd duplication and close -----------------------
+(test fd-dup-and-close-tokens
+  (is (member '(:redir :dup 0 3)  (sbsh::tokenize "read x <&3")   :test #'equal))
+  (is (member '(:redir :dup 1 2)  (sbsh::tokenize "echo 1>&2")    :test #'equal))
+  (is (member '(:redir :close 1)  (sbsh::tokenize "echo >&-")     :test #'equal))
+  (is (member '(:redir :close 0)  (sbsh::tokenize "cat <&-")      :test #'equal)))
+
+;;; --- #13/#14/#15/#16/#19/#42: "$@"/"$*" splitting & adjacency ---------
+(test at-star-quoting-cluster
+  (let ((sbsh::*positional* (list "a b" "c")))
+    (is (equal '("a b" "c") (sbsh::expand-words (sbsh::tokenize "\"$@\""))))
+    (is (equal '("a b" "c") (sbsh::expand-words (sbsh::tokenize "\"${@}\"")))))   ; #14
+  (let ((sbsh::*positional* (list "p" "q")))
+    (is (equal '("ap" "qb") (sbsh::expand-words (sbsh::tokenize "\"a$@b\""))))    ; #15
+    (is (equal '("xp" "q")  (sbsh::expand-words (sbsh::tokenize "x\"$@\""))))     ; #16
+    (is (equal '("xp" "qy") (sbsh::expand-words (sbsh::tokenize "\"x$@y\""))))    ; #19
+    (is (equal '("prep" "q") (sbsh::expand-words (sbsh::tokenize "pre\"$@\"")))))  ; #42
+  ;; #13: assignment value joins rather than splits
+  (let ((sbsh::*positional* (list "a" "b" "c")))
+    (is (equal '("v=a b c") (sbsh::expand-words (sbsh::tokenize "v=\"$*\""))))
+    (is (equal '("v=a b c") (sbsh::expand-words (sbsh::tokenize "v=\"$@\""))))))
+
+;;; --- #40/#41: read field splitting (IFS + escapes) --------------------
+(test read-ifs-splitting
+  ;; #41: IFS whitespace around a non-whitespace delimiter is absorbed
+  (sb-posix:setenv "IFS" " :" 1)
+  (sbsh::assign-read-vars '("w" "x" "y" "z") "a : b : c" nil)
+  (is (string= "a" (sbsh::getenv "w")))
+  (is (string= "b" (sbsh::getenv "x")))
+  (is (string= "c" (sbsh::getenv "y")))
+  (is (string= ""  (sbsh::getenv "z")))
+  (sb-posix:unsetenv "IFS")
+  ;; #40: a backslash-escaped space is literal (non-raw), so it does not split
+  (sbsh::assign-read-vars '("p" "q") "a\\ b" nil)
+  (is (string= "a b" (sbsh::getenv "p")))
+  (is (string= ""    (sbsh::getenv "q")))
+  ;; -r keeps the backslash and splits on the space
+  (sbsh::assign-read-vars '("p" "q") "a\\ b" t)
+  (is (string= "a\\" (sbsh::getenv "p")))
+  (is (string= "b"   (sbsh::getenv "q")))
+  (mapc #'sb-posix:unsetenv '("w" "x" "y" "z" "p" "q")))
+
+;;; --- #12: backslash-quoted heredoc delimiter --------------------------
+(test heredoc-backslash-delimiter
+  (multiple-value-bind (delim quoted end) (sbsh::read-heredoc-delimiter "\\EOF rest" 0)
+    (declare (ignore end))
+    (is (string= "EOF" delim))    ; de-quoted
+    (is-true quoted)))            ; body not expanded
+
+;;; --- #09: trap name normalization -------------------------------------
+(test trap-name-normalization
+  (is (string= "EXIT" (sbsh::normalize-trap-name "EXIT")))
+  (is (string= "EXIT" (sbsh::normalize-trap-name "0")))
+  (is (string= "INT"  (sbsh::normalize-trap-name "INT")))
+  (is (string= "INT"  (sbsh::normalize-trap-name "SIGINT")))
+  (is (string= "TERM" (sbsh::normalize-trap-name "sigterm"))))

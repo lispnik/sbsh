@@ -268,8 +268,11 @@ control operators, honoring quotes.  OP is one of :SEMI :AMP :AND :OR or NIL."
             ((char= c #\)) (when (plusp depth) (decf depth)) (incf i) (setf boundary nil))
             ((plusp depth) (incf i))
             ;; A { ... } command group: track it so its inner ; and newlines
-            ;; are not treated as top-level separators.
-            ((and (char= c #\{) boundary
+            ;; are not treated as top-level separators.  The `{` opens at a word
+            ;; boundary, or directly after a `)` (a `name(){ ... }` function body
+            ;; with no space, #36).
+            ((and (char= c #\{)
+                  (or boundary (and (> i 0) (char= (char string (1- i)) #\))))
                   (let ((nx (and (< (1+ i) n) (char string (1+ i)))))
                     (or (null nx) (member nx '(#\Space #\Tab #\Newline #\Return)))))
              (incf brace) (incf i) (setf boundary t))
@@ -280,18 +283,23 @@ control operators, honoring quotes.  OP is one of :SEMI :AMP :AND :OR or NIL."
             ((char= c #\;) (emit i :semi 1) (incf i) (setf boundary t))
             ((char= c #\Newline)
              ;; A newline separates commands, unless the segment so far ends in
-             ;; a dangling operator (then it is a line continuation).
+             ;; a dangling operator (then it is a line continuation).  A blank
+             ;; segment (empty line) is skipped rather than becoming a clause.
              (let ((seg (string-right-trim '(#\Space #\Tab) (subseq string start i))))
-               (if (and (plusp (length seg))
-                        (member (char seg (1- (length seg))) '(#\| #\< #\>)))
-                   (progn (incf i) (setf boundary t))
-                   (progn (emit i :semi 1) (incf i) (setf boundary t)))))
+               (cond
+                 ((and (plusp (length seg))
+                       (member (char seg (1- (length seg))) '(#\| #\< #\>)))
+                  (incf i) (setf boundary t))
+                 ((zerop (length (string-trim '(#\Space #\Tab) seg)))
+                  (setf start (1+ i)) (incf i) (setf boundary t))    ; blank line
+                 (t (emit i :semi 1) (incf i) (setf boundary t)))))
             ((char= c #\&)
              (cond
                ((and (< (1+ i) n) (char= (char string (1+ i)) #\&))
                 (emit i :and 2) (incf i 2) (setf boundary t))
-               ;; A & that is part of a >& fd-duplication is NOT a separator.
-               ((and (> i 0) (char= (char string (1- i)) #\>)) (incf i) (setf boundary nil))
+               ;; A & that is part of a >& or <& fd-duplication is NOT a separator.
+               ((and (> i 0) (member (char string (1- i)) '(#\> #\<)))
+                (incf i) (setf boundary nil))
                (t (emit i :amp 1) (incf i) (setf boundary t))))
             ((and (char= c #\|) (< (1+ i) n) (char= (char string (1+ i)) #\|))
              (emit i :or 2) (incf i 2) (setf boundary t))
@@ -303,6 +311,25 @@ control operators, honoring quotes.  OP is one of :SEMI :AMP :AND :OR or NIL."
                         (string= "" (string-trim '(#\Space #\Tab #\Newline)
                                                  (getf cl :text)))))
                  (nreverse clauses)))))
+
+(defun terminator-token (term)
+  (case term (:semi ";") (:amp "&") (:and "&&") (:or "||") (t "newline")))
+
+(defun validate-clauses (clauses)
+  "Signal a SHELL-PARSE-ERROR for empty commands around control operators
+(`;`, `&&`, ...) and for a dangling trailing `&&`/`||`.  Returns CLAUSES."
+  (loop for (cl . rest) on clauses
+        for text = (string-trim '(#\Space #\Tab #\Newline #\Return) (getf cl :text))
+        for term = (getf cl :terminator)
+        do (when (zerop (length text))
+             (error 'shell-parse-error :message
+                    (format nil "syntax error near unexpected token `~A'"
+                            (terminator-token term))))
+           (when (and (null rest) (member term '(:and :or)))
+             (error 'shell-parse-error :message
+                    (format nil "syntax error: unexpected end of input after `~A'"
+                            (terminator-token term)))))
+  clauses)
 
 (defun split-pipeline-stages (string)
   "Split a clause segment into raw stage strings at top-level | (respecting
@@ -455,10 +482,17 @@ function definition, a { } group, or a stage pipeline.  NIL when empty."
       (cond
         (fname
          (make-pipeline :commands (list (make-command :special (list :defun fname fbody)))))
-        (t (let ((commands (loop for s in (split-pipeline-stages trimmed)
-                                 for cmd = (parse-stage s)
-                                 when cmd collect cmd)))
-             (and commands (make-pipeline :commands commands))))))))
+        (t (let ((stages (split-pipeline-stages trimmed)))
+             ;; An empty stage means a leading/trailing/doubled | (#22).
+             (when (and (> (length stages) 1)
+                        (some (lambda (s)
+                                (zerop (length (string-trim '(#\Space #\Tab #\Newline #\Return) s))))
+                              stages))
+               (error 'shell-parse-error :message "syntax error near unexpected token `|'"))
+             (let ((commands (loop for s in stages
+                                   for cmd = (parse-stage s)
+                                   when cmd collect cmd)))
+               (and commands (make-pipeline :commands commands)))))))))
 
 (defun terminator->connector (term)
   (case term (:and :and) (:or :or) (t :seq)))
@@ -492,6 +526,7 @@ Words are kept raw; expansion is deferred to REALIZE-COMMAND at run time."
                 (let ((type (second tok)) (fd (third tok)))
                   (case type
                     (:dup (push (list :dup fd (fourth tok)) redirs))
+                    (:close (push (list :close fd) redirs))
                     (:heredoc
                      ;; (:redir :heredoc fd quoted strip); body was pre-read.
                      (push (list :heredoc fd (or (pop *heredoc-bodies*) "") (fourth tok))
@@ -532,6 +567,7 @@ are materialized into a temp file that is applied as an input redirection."
   (let ((type (first spec)) (fd (second spec)))
     (case type
       (:dup (list :dup fd (third spec)))
+      (:close (list :close fd))
       (:heredoc
        (destructuring-bind (body quoted) (cddr spec)
          (materialize-heredoc fd (if quoted body (expand-heredoc-body body)))))

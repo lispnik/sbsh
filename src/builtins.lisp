@@ -78,6 +78,10 @@ symlinks), so cd keeps the logical path like bash's default."
 pathname wildcards (e.g. the `[` command) are handled literally."
   (ignore-errors (sb-posix:stat path) t))
 
+(defun file-executable-p (path)
+  "True if PATH is executable by the current process."
+  (ignore-errors (sb-posix:access path sb-posix:x-ok) t))
+
 (defun path-search (name)
   "Return the full path of executable NAME found on $PATH, or NIL.
 Names containing a slash are returned as-is if they exist."
@@ -101,7 +105,14 @@ Names containing a slash are returned as-is if they exist."
   0)
 
 (define-builtin "exit" (args)
-  (let ((code (if args (or (parse-integer (first args) :junk-allowed t) 0) *last-status*)))
+  (let ((code (cond
+                ((null args) *last-status*)
+                (t (let ((n (parse-integer (first args) :junk-allowed t)))
+                     (cond
+                       (n (logand n #xff))     ; exit status is mod 256
+                       (t (format *error-output* "exit: ~A: numeric argument required~%"
+                                  (first args))
+                          2)))))))
     (setf *should-exit* code)
     code))
 
@@ -137,16 +148,24 @@ Names containing a slash are returned as-is if they exist."
   0)
 
 (defun set-o-option (name on)
+  "Set a long-named shell option; returns NIL for an unknown name (so `set`
+can report failure and exit non-zero)."
   (cond
-    ((string= name "pipefail") (setf *pipefail* on))
-    ((string= name "errexit") (setf *errexit* on))
-    ((string= name "nounset") (setf *nounset* on))
-    (t (format *error-output* "set: ~A: invalid option name~%" name))))
+    ((string= name "pipefail") (setf *pipefail* on) t)
+    ((string= name "errexit") (setf *errexit* on) t)
+    ((string= name "nounset") (setf *nounset* on) t)
+    ((string= name "noclobber") (setf *noclobber* on) t)
+    ((string= name "noglob") (setf *noglob* on) t)
+    ((string= name "xtrace") (setf *xtrace* on) t)
+    (t (format *error-output* "set: ~A: invalid option name~%" name) nil)))
 
 (defun print-set-options ()
-  (format t "pipefail~vT~A~%" 12 (if *pipefail* "on" "off"))
-  (format t "errexit~vT~A~%"  12 (if *errexit* "on" "off"))
-  (format t "nounset~vT~A~%"  12 (if *nounset* "on" "off")))
+  (format t "pipefail~vT~A~%"  12 (if *pipefail* "on" "off"))
+  (format t "errexit~vT~A~%"   12 (if *errexit* "on" "off"))
+  (format t "nounset~vT~A~%"   12 (if *nounset* "on" "off"))
+  (format t "noclobber~vT~A~%" 12 (if *noclobber* "on" "off"))
+  (format t "noglob~vT~A~%"    12 (if *noglob* "on" "off"))
+  (format t "xtrace~vT~A~%"    12 (if *xtrace* "on" "off")))
 
 (define-builtin "set" (args)
   (cond
@@ -155,21 +174,28 @@ Names containing a slash are returned as-is if they exist."
        (format t "~A~%" kv))
      0)
     (t
-     (loop while args do
-       (let ((tok (pop args)))
-         (cond
-           ((string= tok "--") (setf *positional* (copy-list args)) (setf args nil))
-           ((or (string= tok "-o") (string= tok "+o"))
-            (if args (set-o-option (pop args) (string= tok "-o")) (print-set-options)))
-           ((and (plusp (length tok)) (member (char tok 0) '(#\- #\+)))
-            (let ((on (char= (char tok 0) #\-)))
-              (loop for c across (subseq tok 1) do
-                (case c
-                  (#\e (setf *errexit* on))
-                  (#\u (setf *nounset* on))
-                  (#\x nil)))))       ; xtrace: accepted, not implemented
-           (t (setf *positional* (cons tok args)) (setf args nil)))))
-     0)))
+     (let ((status 0))
+       (loop while args do
+         (let ((tok (pop args)))
+           (cond
+             ((string= tok "--") (setf *positional* (copy-list args)) (setf args nil))
+             ((or (string= tok "-o") (string= tok "+o"))
+              (if args
+                  (unless (set-o-option (pop args) (string= tok "-o")) (setf status 1))
+                  (print-set-options)))
+             ((and (plusp (length tok)) (member (char tok 0) '(#\- #\+)))
+              (let ((on (char= (char tok 0) #\-)))
+                (loop for c across (subseq tok 1) do
+                  (case c
+                    (#\e (setf *errexit* on))
+                    (#\u (setf *nounset* on))
+                    (#\x (setf *xtrace* on))
+                    (#\f (setf *noglob* on))
+                    (#\C (setf *noclobber* on))
+                    (t (format *error-output* "set: -~A: invalid option~%" c)
+                       (setf status 1))))))
+             (t (setf *positional* (cons tok args)) (setf args nil)))))
+       status))))
 
 (define-builtin "history" (args)
   (cond
@@ -275,61 +301,156 @@ Names containing a slash are returned as-is if they exist."
 (define-builtin ":" (args) 0)
 (define-builtin "false" (args) 1)
 
-(define-builtin "shift" (args)
-  (let ((n (if args (or (parse-integer (first args) :junk-allowed t) 1) 1)))
-    (if (<= n (length *positional*))
-        (progn (setf *positional* (nthcdr n *positional*)) 0)
-        1)))
+(define-builtin "eval" (args)
+  "Concatenate ARGS with spaces and execute the result as shell input."
+  (when args
+    (run-command-string (format nil "~{~A~^ ~}" args)))
+  *last-status*)
 
-(defun assign-read-vars (vars line)
-  "Assign LINE to VARS per IFS: the first VARS get one field each; the last var
-gets the unsplit remainder (internal whitespace preserved, ends trimmed)."
-  (let* ((ifs (ifs-value)) (n (length vars)) (len (length line)) (i 0))
+(defun source-file (path pos-args)
+  "Execute the commands in the file at PATH in the current shell environment."
+  (if (null path)
+      (progn (format *error-output* "sbsh: .: filename argument required~%") 2)
+      (let ((full (if (find #\/ path) path (or (path-search path) path)))
+            ;; `. file a b c` sets the positional parameters for the script.
+            (*positional* (if pos-args pos-args *positional*)))
+        (handler-case
+            (with-open-file (in full :external-format :utf-8)
+              (run-lines (lambda () (read-line in nil :eof)))
+              *last-status*)
+          (file-error ()
+            (format *error-output* "sbsh: .: ~A: No such file or directory~%" path)
+            1)))))
+
+(define-builtin "." (args) (source-file (first args) (rest args)))
+(define-builtin "source" (args) (source-file (first args) (rest args)))
+
+(define-builtin "exec" (args)
+  "exec CMD ARGS...: replace the shell with CMD.  With no command (only
+redirections), the redirections are applied to the shell permanently -- handled
+in RUN-STANDALONE-BUILTIN before we get here."
+  (if (null args)
+      0
+      (let ((path (path-search (first args))))
+        (finish-output)
+        (cond
+          ((null path)
+           (format *error-output* "sbsh: exec: ~A: not found~%" (first args))
+           (setf *should-exit* 127)
+           127)
+          (t (%execvp path (build-argv args))       ; only returns on failure
+             (let ((code (if (file-executable-p path) 127 126)))
+               (format *error-output* "sbsh: exec: ~A: ~A~%" (first args)
+                       (if (= code 126) "Permission denied" "not found"))
+               (finish-output *error-output*)
+               (sb-ext:exit :code code :abort t)))))))
+
+(define-builtin "readonly" (args)
+  (cond
+    ((null args)
+     (maphash (lambda (k v) (declare (ignore v)) (format t "readonly ~A~%" k))
+              *readonly-vars*)
+     0)
+    (t (dolist (a args)
+         (let ((eq (position #\= a)))
+           (if eq
+               (let ((name (subseq a 0 eq)))
+                 (sb-posix:setenv name (expand-assignment-value (subseq a (1+ eq))) 1)
+                 (setf (gethash name *readonly-vars*) t))
+               (setf (gethash a *readonly-vars*) t))))
+       0)))
+
+(define-builtin "shift" (args)
+  (let ((n (if args (parse-integer (first args) :junk-allowed t) 1)))
+    (cond
+      ((or (null n) (minusp n))
+       (format *error-output* "shift: ~A: bad shift count~%" (first args))
+       1)
+      ((> n (length *positional*)) 1)          ; over-shift: no change, fail
+      (t (setf *positional* (nthcdr n *positional*)) 0))))
+
+(defun assign-read-vars (vars line &optional raw-p)
+  "Assign LINE to VARS per IFS.  The first VARS get one field each; the last var
+gets the unsplit remainder (trailing IFS whitespace trimmed).  Unless RAW-P, a
+backslash quotes the next character so an escaped IFS char does not split (#40).
+IFS whitespace adjacent to an IFS non-whitespace delimiter is absorbed (#41)."
+  (let* ((ifs (ifs-value)) (nvars (length vars)) (n (length line)) (i 0))
     (when (zerop (length ifs))          ; empty IFS: no splitting at all
-      (sb-posix:setenv (first vars) line 1)
+      (sb-posix:setenv (first vars) (if raw-p line (remove-backslashes line)) 1)
       (dolist (v (rest vars)) (sb-posix:setenv v "" 1))
       (return-from assign-read-vars))
-    (labels ((ws-p (c) (and (member c '(#\Space #\Tab #\Newline)) (find c ifs)))
-             (delim-p (c) (find c ifs))
-             (nonws-p (c) (and (not (member c '(#\Space #\Tab #\Newline))) (find c ifs))))
-      (loop while (and (< i len) (ws-p (char line i))) do (incf i))   ; trim leading
+    (let ((ifs-ws (remove-if-not (lambda (c) (member c '(#\Space #\Tab #\Newline)))
+                                 (coerce ifs 'list))))
+     (labels ((ws-p (c) (and (member c '(#\Space #\Tab #\Newline)) (find c ifs)))
+             (nonws-p (c) (and (find c ifs) (not (member c '(#\Space #\Tab #\Newline)))))
+             (skip-ws () (loop while (and (< i n) (ws-p (char line i))) do (incf i)))
+             ;; Consume one logical delimiter: IFS whitespace, plus at most one
+             ;; IFS non-whitespace char, with surrounding whitespace absorbed.
+             (skip-delim ()
+               (skip-ws)
+               (when (and (< i n) (nonws-p (char line i))) (incf i) (skip-ws)))
+             (read-field ()
+               (with-output-to-string (out)
+                 (loop while (< i n) do
+                   (let ((c (char line i)))
+                     (cond
+                       ((and (not raw-p) (char= c #\\) (< (1+ i) n))
+                        (write-char (char line (1+ i)) out) (incf i 2))  ; escaped
+                       ((find c ifs) (return))
+                       (t (write-char c out) (incf i))))))))
+      (skip-ws)                         ; trim leading IFS whitespace
       (loop for vi from 0 for v in vars do
-        (cond
-          ((= vi (1- n))
-           ;; last var: the remainder with trailing IFS characters trimmed
-           (let ((end len))
-             (loop while (and (> end i) (delim-p (char line (1- end)))) do (decf end))
-             (sb-posix:setenv v (subseq line i (max i end)) 1)))
-          (t (let ((start i))
-               (loop while (and (< i len) (not (delim-p (char line i)))) do (incf i))
-               (sb-posix:setenv v (subseq line start i) 1)
-               (if (and (< i len) (nonws-p (char line i)))
-                   (progn (incf i) (loop while (and (< i len) (ws-p (char line i))) do (incf i)))
-                   (loop while (and (< i len) (ws-p (char line i))) do (incf i))))))))))
+        (if (= vi (1- nvars))
+            ;; last var: remainder (escapes processed, trailing IFS ws trimmed)
+            (let ((rest (with-output-to-string (out)
+                          (loop while (< i n) do
+                            (let ((c (char line i)))
+                              (cond
+                                ((and (not raw-p) (char= c #\\) (< (1+ i) n))
+                                 (write-char (char line (1+ i)) out) (incf i 2))
+                                (t (write-char c out) (incf i))))))))
+              (sb-posix:setenv v (string-right-trim ifs-ws rest) 1))
+            (progn (sb-posix:setenv v (read-field) 1) (skip-delim))))
+      ;; If the line ran out before the last var, remaining vars are empty.
+      nil))))
+
+(defun remove-backslashes (s)
+  "Remove backslash escapes from S (each \\X -> X), for non-raw read."
+  (if (find #\\ s)
+      (with-output-to-string (out)
+        (let ((i 0) (n (length s)))
+          (loop while (< i n) do
+            (if (and (char= (char s i) #\\) (< (1+ i) n))
+                (progn (write-char (char s (1+ i)) out) (incf i 2))
+                (progn (write-char (char s i) out) (incf i))))))
+      s))
+
+(defun odd-trailing-backslashes-p (line)
+  "True if LINE ends with an odd number of backslashes (so the last one is a
+line-continuation, not an escaped backslash)."
+  (let ((k 0))
+    (loop for i downfrom (1- (length line)) to 0
+          while (char= (char line i) #\\) do (incf k))
+    (oddp k)))
 
 (defun read-input-line (raw-p)
-  "Read one input line for `read`.  Unless RAW-P, backslash escapes the next
-character and a trailing backslash continues onto the next line.  Returns
-(values LINE MISSING-NEWLINE); LINE is NIL at end of input."
+  "Read one input line for `read`.  Unless RAW-P, a trailing backslash continues
+onto the next line (the backslash-newline is removed); other backslash escapes
+are left in place for ASSIGN-READ-VARS to process during field splitting.
+Returns (values LINE MISSING-NEWLINE); LINE is NIL at end of input."
   (multiple-value-bind (line missing) (read-line (tty-in) nil nil)
     (cond
       ((null line) (values nil t))
       (raw-p (values line missing))
       (t (let ((out (make-string-output-stream)))
            (loop
-             (let ((i 0) (n (length line)) (cont nil))
-               (loop while (< i n) do
-                 (let ((c (char line i)))
-                   (cond
-                     ((and (char= c #\\) (= i (1- n))) (setf cont t) (incf i))
-                     ((and (char= c #\\) (< (1+ i) n))
-                      (write-char (char line (1+ i)) out) (incf i 2))
-                     (t (write-char c out) (incf i)))))
-               (if cont
+             (if (odd-trailing-backslashes-p line)
+                 (progn
+                   (write-string (subseq line 0 (1- (length line))) out)  ; drop trailing \
                    (multiple-value-bind (nl nm) (read-line (tty-in) nil nil)
                      (if (null nl) (progn (setf missing t) (return))
-                         (setf line nl missing nm)))
-                   (return))))
+                         (setf line nl missing nm))))
+                 (progn (write-string line out) (return))))
            (values (get-output-stream-string out) missing))))))
 
 (define-builtin "read" (args)
@@ -341,8 +462,64 @@ at end of input (a final line with no newline still assigns)."
     (multiple-value-bind (line missing-newline) (read-input-line raw-p)
       (if (null line)
           1                             ; end of input, nothing read
-          (progn (assign-read-vars (or args (list "REPLY")) line)
+          (progn (assign-read-vars (or args (list "REPLY")) line raw-p)
                  (if missing-newline 1 0))))))
+
+(defun normalize-trap-name (spec)
+  "Canonical trap condition name for SPEC: EXIT (or 0), or a signal short name
+like INT / TERM (SIG-prefix and numbers accepted)."
+  (let ((up (string-upcase spec)))
+    (cond
+      ((or (string= up "EXIT") (string= up "0")) "EXIT")
+      (t (let ((num (signal-number spec)))
+           (if num
+               (or (car (rassoc num (signal-name-alist))) up)
+               (if (starts-with-subseq "SIG" up) (subseq up 3) up)))))))
+
+(defun signal-name-alist ()
+  (list (cons "HUP" sb-posix:sighup) (cons "INT" sb-posix:sigint)
+        (cons "QUIT" sb-posix:sigquit) (cons "TERM" sb-posix:sigterm)
+        (cons "USR1" sb-posix:sigusr1) (cons "USR2" sb-posix:sigusr2)
+        (cons "ALRM" sb-posix:sigalrm)))
+
+(defun install-trap-handler (name)
+  "Install a signal handler that runs the trap action registered for NAME."
+  (let ((num (signal-number name)))
+    (when num
+      (ignore-errors
+       (sb-sys:enable-interrupt
+        num (lambda (&rest _)
+              (declare (ignore _))
+              (let ((action (gethash name *traps*)))
+                (when action (ignore-errors (run-command-string action))))))))))
+
+(defun run-exit-trap ()
+  "Run the EXIT trap action, if any (called just before the shell exits)."
+  (let ((action (gethash "EXIT" *traps*)))
+    (when action
+      (remhash "EXIT" *traps*)            ; run at most once
+      ;; The trap runs even though `exit` set *should-exit*; bind it off so the
+      ;; trap body actually executes, then let the caller exit with its code.
+      (let ((*should-exit* nil))
+        (ignore-errors (run-command-string action))))))
+
+(define-builtin "trap" (args)
+  (cond
+    ((or (null args) (and (string= (first args) "-p") (null (rest args))))
+     (maphash (lambda (k v) (format t "trap -- '~A' ~A~%" v k)) *traps*)
+     0)
+    (t (let ((action (first args)) (names (rest args)))
+         ;; `trap - SIG` (or an empty/`-` action) resets the trap.
+         (dolist (spec names)
+           (let ((name (normalize-trap-name spec)))
+             (cond
+               ((string= action "-")
+                (remhash name *traps*)
+                (let ((num (signal-number name)))
+                  (when num (ignore-errors (sb-sys:enable-interrupt num :default)))))
+               (t (setf (gethash name *traps*) action)
+                  (unless (string= name "EXIT") (install-trap-handler name))))))
+         0))))
 
 (define-builtin "wait" (args)
   "Block until all child processes have finished."
@@ -367,9 +544,17 @@ at end of input (a final line with no newline still assigns)."
   (let ((s (ignore-errors (sb-posix:stat path))))
     (and s (plusp (sb-posix:stat-size s)))))
 
+(defun parse-int-strict (s)
+  "Parse S as an integer only if the WHOLE token is numeric (optionally signed,
+surrounding blanks allowed).  Returns NIL for junk like \"3x\" -- unlike
+PARSE-INTEGER :junk-allowed, which would silently accept the leading 3."
+  (multiple-value-bind (n end) (parse-integer s :junk-allowed t)
+    (and n (= end (length (string-right-trim '(#\Space #\Tab) s))) n)))
+
 (defun test-int (a op b cmp)
-  (let ((x (parse-integer a :junk-allowed t))
-        (y (parse-integer b :junk-allowed t)))
+  (declare (ignore op))
+  (let ((x (parse-int-strict a))
+        (y (parse-int-strict b)))
     (if (and x y)
         (if (funcall cmp x y) 0 1)
         (progn (format *error-output* "[: integer expression expected~%") 2))))
@@ -449,17 +634,58 @@ at end of input (a final line with no newline still assigns)."
            (if (zerop (test-primary (rest args))) 1 0)
            (progn (format *error-output* "[: too many arguments~%") 2)))))
 
+;;; A small recursive-descent grammar so that ( ) grouping, ! negation, and the
+;;; -a / -o connectives all compose (e.g. [ ( a = a -o b = c ) -a ! -z x ]).
+;;;   or   := and  ( -o and )*
+;;;   and  := term ( -a term )*
+;;;   term := ! term | ( or ) | primary
+
+(defun test-atom (args)
+  "Consume one primary (up to the next -a / -o / ) or the end); return
+(values CODE REMAINING-ARGS)."
+  (let ((prim '()) (rest args))
+    (loop while (and rest (not (member (first rest) '("-a" "-o" ")") :test #'string=)))
+          do (push (pop rest) prim))
+    (values (test-primary (nreverse prim)) rest)))
+
+(defun test-term (args)
+  (cond
+    ((null args) (values 1 nil))
+    ((string= (first args) "!")
+     (multiple-value-bind (v rest) (test-term (rest args))
+       (values (if (zerop v) 1 0) rest)))
+    ((string= (first args) "(")
+     (multiple-value-bind (v rest) (test-or-expr (rest args))
+       (if (and rest (string= (first rest) ")"))
+           (values v (rest rest))
+           (progn (format *error-output* "[: missing `)'~%") (values 2 nil)))))
+    (t (test-atom args))))
+
+(defun test-and-expr (args)
+  (multiple-value-bind (v rest) (test-term args)
+    (loop while (and rest (string= (first rest) "-a"))
+          do (multiple-value-bind (v2 r2) (test-term (rest rest))
+               (setf v (if (and (zerop v) (zerop v2)) 0 1) rest r2)))
+    (values v rest)))
+
+(defun test-or-expr (args)
+  (multiple-value-bind (v rest) (test-and-expr args)
+    (loop while (and rest (string= (first rest) "-o"))
+          do (multiple-value-bind (v2 r2) (test-and-expr (rest rest))
+               (setf v (if (or (zerop v) (zerop v2)) 0 1) rest r2)))
+    (values v rest)))
+
 (defun shell-test (args)
-  "Evaluate a test expression, honoring -o (OR) / -a (AND) between primaries."
-  (if (not (or (member "-a" args :test #'string=) (member "-o" args :test #'string=)))
+  "Evaluate a test expression with ( ) grouping, ! negation, and -a / -o.
+Plain 0-3 argument expressions bypass the grammar for POSIX corner-case
+compatibility (e.g. [ ( ] tests the string \"(\")."
+  (if (and (<= (length args) 3)
+           (not (member ")" args :test #'string=)))
       (test-primary args)
-      (let ((any nil))
-        (dolist (or-part (split-arg-list args "-o"))
-          (let ((all t))
-            (dolist (and-part (split-arg-list or-part "-a"))
-              (unless (zerop (test-primary and-part)) (setf all nil)))
-            (when all (setf any t))))
-        (if any 0 1))))
+      (multiple-value-bind (v rest) (test-or-expr args)
+        (if rest
+            (progn (format *error-output* "[: unexpected argument `~A'~%" (first rest)) 2)
+            v))))
 
 (define-builtin "test" (args) (shell-test args))
 

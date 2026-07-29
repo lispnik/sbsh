@@ -48,22 +48,31 @@ controlling terminal, and ignore job-control signals."
     (:heredoc (let ((fd (sb-posix:open file sb-posix:o-rdonly)))
                 (ignore-errors (delete-file file))
                 fd))
-    (:out (sb-posix:open file
+    ;; > honors set -C (noclobber): refuse to truncate an existing file.
+    (:out (when (and *noclobber* (file-exists-p file))
+            (error 'shell-error :message
+                   (format nil "~A: cannot overwrite existing file" file)))
+          (sb-posix:open file
                          (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-trunc)
                          #o644))
+    ;; >| forces truncation regardless of noclobber.
+    (:clobber (sb-posix:open file
+                             (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-trunc)
+                             #o644))
     (:append (sb-posix:open file
                             (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-append)
                             #o644))))
 
 (defun apply-child-redir (r)
   "Apply redirection R permanently in the current (child) process."
-  (destructuring-bind (type fd target) r
+  (destructuring-bind (type fd &optional target) r
     (handler-case
-        (if (eq type :dup)
-            (sb-posix:dup2 target fd)
-            (let ((newfd (open-redir-file type target)))
-              (sb-posix:dup2 newfd fd)
-              (unless (= newfd fd) (sb-posix:close newfd))))
+        (cond
+          ((eq type :close) (ignore-errors (sb-posix:close fd)))
+          ((eq type :dup) (sb-posix:dup2 target fd))
+          (t (let ((newfd (open-redir-file type target)))
+               (sb-posix:dup2 newfd fd)
+               (unless (= newfd fd) (sb-posix:close newfd)))))
       (error ()
         (format *error-output* "sbsh: ~A: cannot open~%" target)
         (finish-output *error-output*)
@@ -75,14 +84,15 @@ controlling terminal, and ignore job-control signals."
     (unwind-protect
          (progn
            (dolist (r redirs)
-             (destructuring-bind (type fd target) r
-               (let ((save (sb-posix:dup fd)))
-                 (push (cons fd save) saved)
-                 (if (eq type :dup)
-                     (sb-posix:dup2 target fd)
-                     (let ((newfd (open-redir-file type target)))
-                       (sb-posix:dup2 newfd fd)
-                       (sb-posix:close newfd))))))
+             (destructuring-bind (type fd &optional target) r
+               (let ((save (ignore-errors (sb-posix:dup fd))))
+                 (when save (push (cons fd save) saved))
+                 (cond
+                   ((eq type :close) (ignore-errors (sb-posix:close fd)))
+                   ((eq type :dup) (sb-posix:dup2 target fd))
+                   (t (let ((newfd (open-redir-file type target)))
+                        (sb-posix:dup2 newfd fd)
+                        (sb-posix:close newfd)))))))
            (funcall thunk))
       (dolist (pair saved)
         (ignore-errors (sb-posix:dup2 (cdr pair) (car pair)))
@@ -153,10 +163,14 @@ the child.  argv is built before the fork so the child does no allocation."
             (finish-output)
             (sb-ext:exit :code code :abort t)))
          (t
-          (%execvp path alien-argv)
-          (format *error-output* "sbsh: ~A: command not found~%" path)
-          (finish-output *error-output*)
-          (sb-ext:exit :code 127 :abort t)))))))
+          (%execvp path alien-argv)      ; returns only on failure
+          ;; Distinguish "found but not executable / a directory" (126) from
+          ;; "not found" (127), like POSIX shells.
+          (let ((not-exec (and (file-exists-p path) (not (file-executable-p path)))))
+            (format *error-output* "sbsh: ~A: ~A~%" path
+                    (if not-exec "Permission denied" "command not found"))
+            (finish-output *error-output*)
+            (sb-ext:exit :code (if not-exec 126 127) :abort t))))))))
 
 ;;; --- Job foreground / background ----------------------------------------
 
@@ -210,9 +224,25 @@ the child.  argv is built before the fork so the child does no allocation."
          (let ((argv (command-argv (first cmds))))
            (or (null argv) (builtin-p (first argv)))))))
 
+(defun apply-shell-redir-permanent (r)
+  "Apply redirection R to the shell's own fds without saving/restoring (for
+`exec` with only redirections)."
+  (destructuring-bind (type fd &optional target) r
+    (ignore-errors
+     (cond
+       ((eq type :close) (sb-posix:close fd))
+       ((eq type :dup) (sb-posix:dup2 target fd))
+       (t (let ((newfd (open-redir-file type target)))
+            (sb-posix:dup2 newfd fd)
+            (unless (= newfd fd) (sb-posix:close newfd))))))))
+
 (defun run-standalone-builtin (pipeline)
   (let* ((cmd (first (pipeline-commands pipeline)))
          (argv (command-argv cmd)))
+    ;; `exec` with only redirections applies them to the shell permanently.
+    (when (and argv (string= (first argv) "exec") (null (rest argv)))
+      (dolist (r (command-redirs cmd)) (apply-shell-redir-permanent r))
+      (return-from run-standalone-builtin (setf *last-status* 0)))
     (flet ((run () (if argv
                        (run-builtin (first argv) (rest argv))
                        ;; A pure assignment (empty argv) takes the status of the
@@ -250,8 +280,10 @@ the child.  argv is built before the fork so the child does no allocation."
                            out))))
 
 (defun apply-assignment (s)
-  (let ((eq (position #\= s)))
-    (sb-posix:setenv (subseq s 0 eq) (expand-assignment-value (subseq s (1+ eq))) 1)))
+  (let* ((eq (position #\= s)) (name (subseq s 0 eq)))
+    (when (gethash name *readonly-vars*)
+      (error 'shell-error :message (format nil "~A: is read only" name)))
+    (sb-posix:setenv name (expand-assignment-value (subseq s (1+ eq))) 1)))
 
 (defun strip-leading-assignments (cmd)
   "Move any leading NAME=VALUE words of CMD into the environment.  A pure
@@ -325,6 +357,9 @@ is applied only for that command and undone afterwards via *ASSIGNMENT-RESTORES*
 (defun %launch-pipeline (pipeline)
   "Fork the commands of PIPELINE into a process group and run it."
   (mapc #'realize-command (pipeline-commands pipeline))
+  (when *xtrace*                        ; set -x: trace the expanded command
+    (format *error-output* "+ ~A~%" (pipeline->string pipeline))
+    (finish-output *error-output*))
   (dolist (c (pipeline-commands pipeline))
     (push (if (command-lisp c) (list :lisp) (command-argv c)) *line-commands*))
   (let ((cmds (pipeline-commands pipeline)))
@@ -382,6 +417,7 @@ is applied only for that command and undone afterwards via *ASSIGNMENT-RESTORES*
     (add-job job)
     (if bg
         (progn
+          (setf *last-bg-pid* (proc-pid (car (last (job-procs job)))))  ; for $!
           (when *interactive*
             (format *error-output* "[~D] ~D~%" (job-id job) pgid))
           (setf *last-status* 0))
@@ -396,7 +432,7 @@ is applied only for that command and undone afterwards via *ASSIGNMENT-RESTORES*
   "Parse and execute a full command line, honoring && || ; & connectors.
 Each clause is tokenized/parsed lazily, right before it runs, so expansions
 reflect state produced by earlier clauses on the same line."
-  (let ((run-next t) (clauses (split-clauses string)))
+  (let ((run-next t) (clauses (validate-clauses (split-clauses string))))
     (loop for (cl . rest) on clauses
           for term = (getf cl :terminator)
           ;; A clause that feeds a && / || (or is a && / || operand) is a
@@ -405,9 +441,10 @@ reflect state produced by earlier clauses on the same line."
           do (when run-next
                (let ((*condition-context* cond-p))
                  (run-clause (getf cl :text) term)))
-             ;; errexit: exit if a plain statement failed.
-             (when (and *errexit* run-next (not cond-p) (not *should-exit*)
-                        (not (zerop *last-status*)))
+             ;; errexit: exit if a plain statement failed.  A !-negated pipeline
+             ;; is exempt (POSIX), as are &&/|| operands and conditions.
+             (when (and *errexit* run-next (not cond-p) (not *clause-negated*)
+                        (not *should-exit*) (not (zerop *last-status*)))
                (setf *should-exit* *last-status*))
              (setf run-next
                    (case term
@@ -421,7 +458,8 @@ reflect state produced by earlier clauses on the same line."
   "Parse and run one clause.  Errors are confined to this clause so that
 `;`-separated clauses after a failure still run.  An unknown command triggers
 the interactive correction menu (innermost handler) and otherwise fails 127."
-  (setf *cmdsub-status* nil)   ; reset before parsing (where $(...) runs)
+  (setf *cmdsub-status* nil       ; reset before parsing (where $(...) runs)
+        *clause-negated* nil)
   (handler-case
       (handler-bind
           ((command-not-found
@@ -432,7 +470,10 @@ the interactive correction menu (innermost handler) and otherwise fails 127."
         (let ((pl (parse-segment text)))
           (when pl
             (when (eq term :amp) (setf (pipeline-background pl) t))
-            (launch-pipeline pl))))
+            ;; Record negation AFTER running (a compound body's inner clauses
+            ;; would otherwise overwrite the flag before the errexit check).
+            (prog1 (launch-pipeline pl)
+              (setf *clause-negated* (pipeline-negate pl))))))
     (command-not-found (c)
       (unless *interactive*
         (format *error-output* "sbsh: ~A: command not found~%"
@@ -444,10 +485,23 @@ the interactive correction menu (innermost handler) and otherwise fails 127."
     (sb-posix:syscall-error (e)
       (format *error-output* "sbsh: ~A~%" e)
       (setf *last-status* 1))
-    (shell-error (e)
+    (expansion-error (e)
       (format *error-output* "sbsh: ~A~%" e)
+      ;; An expansion error (${v:?}, set -u) is status 2 (per POSIX/dash) and
+      ;; exits a non-interactive shell.
+      (setf *last-status* 2)
+      (unless *interactive* (setf *should-exit* 2)))
+    (shell-error (e)
+      ;; Other shell errors (e.g. a noclobber redirection failure) fail the
+      ;; command but do NOT exit the shell.
+      (format *error-output* "sbsh: ~A~%" e)
+      (setf *last-status* 1))
+    (storage-condition (e)
+      ;; Control-stack / heap exhaustion -- e.g. pathologically deep $(...) or
+      ;; recursion.  Contain it to this clause so an interactive shell returns
+      ;; to the prompt instead of the whole Lisp image dying.
+      (ignore-errors (format *error-output* "sbsh: ~A~%" e))
       (setf *last-status* 1)
-      ;; An expansion error (${v:?}, set -u) exits a non-interactive shell.
       (unless *interactive* (setf *should-exit* 1)))))
 
 ;;; --- Top-level entry ----------------------------------------------------
@@ -462,9 +516,13 @@ are handled per clause in RUN-CLAUSE; this is just a last-resort guard."
     (unwind-protect
          (prog1
              (handler-case (run-command-line line)
+               (shell-parse-error (e)
+                 (format *error-output* "sbsh: syntax error: ~A~%" (parse-error-message e))
+                 (setf *last-status* 2)
+                 (unless *interactive* (setf *should-exit* 2)))
                (shell-error (c)
                  (format *error-output* "sbsh: ~A~%" c)
-                 (setf *last-status* 1)))
+                 (setf *last-status* 2)))
            (record-history-line line))
       ;; Backstop: remove any heredoc temp files not already unlinked on open.
       (dolist (p *heredoc-temps*) (ignore-errors (delete-file p))))))

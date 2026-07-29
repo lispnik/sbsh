@@ -47,6 +47,19 @@ occurrence of a word in KEYWORDS; NIL if none before the end."
       (declare (ignore w))
       (skip-blanks text end))))
 
+(defun run-loop-iteration (body-text outer-depth)
+  "Run one loop-body iteration via RUN-COMMAND-LINE.  Returns :BREAK to stop the
+enclosing loop, or NIL to proceed to the next iteration.  Multi-level break N /
+continue N is propagated outward one level at a time through 'SBSH-LOOPCTL, so
+`break 2` in an inner loop also stops the outer one."
+  (let ((sig (catch 'sbsh-loopctl (run-command-line body-text) nil)))
+    (if (null sig)
+        nil
+        (destructuring-bind (kind . n) sig
+          (if (and (> n 1) (plusp outer-depth))
+              (throw 'sbsh-loopctl (cons kind (1- n)))
+              (ecase kind (:break :break) (:continue nil)))))))
+
 ;;; --- if / elif / else ---------------------------------------------------
 
 (defun eval-compound (text)
@@ -106,18 +119,25 @@ occurrence of a word in KEYWORDS; NIL if none before the end."
              (done-start (or (nth-value 1 (scan-to-keyword text body-start '("done")))
                              (length text)))
              (body-text (subseq text body-start done-start))
+             (outer-depth *loop-depth*)
              (*loop-depth* (1+ *loop-depth*)))
         ;; A loop's exit status is that of the last command in its body
         ;; (0 if the body never runs), not the final (false) condition.
         (let ((body-status 0))
-          (catch 'sbsh-break
+          (block loop-done
             (loop
               (let ((*condition-context* t)) (run-command-line cond-text))
+              ;; errexit or `exit` inside the condition stops the loop.
+              (when *should-exit* (return-from loop-done))
               (let ((ok (zerop *last-status*)))
                 (when until (setf ok (not ok)))
-                (unless ok (return)))
-              (catch 'sbsh-continue (run-command-line body-text))
-              (setf body-status *last-status*)))
+                (unless ok (return-from loop-done)))
+              (when (eq (run-loop-iteration body-text outer-depth) :break)
+                (return-from loop-done))
+              (setf body-status *last-status*)
+              ;; errexit tripped by a body command (or `exit`) stops the loop
+              ;; instead of spinning forever on a `while true`.
+              (when *should-exit* (return-from loop-done))))
           (setf *last-status* body-status))))))
 
 ;;; --- for ----------------------------------------------------------------
@@ -140,12 +160,15 @@ occurrence of a word in KEYWORDS; NIL if none before the end."
                (done-start (or (nth-value 1 (scan-to-keyword text body-start '("done")))
                                (length text)))
                (body-text (subseq text body-start done-start))
+               (outer-depth *loop-depth*)
                (*loop-depth* (1+ *loop-depth*)))
           (setf *last-status* 0)
-          (catch 'sbsh-break
+          (block loop-done
             (dolist (item items)
               (sb-posix:setenv name item 1)
-              (catch 'sbsh-continue (run-command-line body-text))))
+              (when (eq (run-loop-iteration body-text outer-depth) :break)
+                (return-from loop-done))
+              (when *should-exit* (return-from loop-done))))
           *last-status*)))))
 
 ;;; --- case ---------------------------------------------------------------
@@ -213,14 +236,19 @@ list of pattern strings.  Clauses are `pat|pat) list ;;`."
 
 ;;; --- break / continue ---------------------------------------------------
 
+(defun loop-level-arg (args)
+  "Parse the optional numeric level of break/continue (default 1, min 1)."
+  (if args
+      (let ((n (parse-integer (first args) :junk-allowed t)))
+        (if (and n (plusp n)) n 1))
+      1))
+
 (define-builtin "break" (args)
-  (declare (ignore args))
   (if (plusp *loop-depth*)
-      (throw 'sbsh-break 0)
+      (throw 'sbsh-loopctl (cons :break (loop-level-arg args)))
       (progn (format *error-output* "break: only meaningful in a loop~%") 0)))
 
 (define-builtin "continue" (args)
-  (declare (ignore args))
   (if (plusp *loop-depth*)
-      (throw 'sbsh-continue 0)
+      (throw 'sbsh-loopctl (cons :continue (loop-level-arg args)))
       (progn (format *error-output* "continue: only meaningful in a loop~%") 0)))

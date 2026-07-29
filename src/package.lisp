@@ -74,10 +74,26 @@
 (defvar *errexit* nil   "set -e: exit on an unhandled command failure.")
 (defvar *nounset* nil   "set -u: expanding an unset variable is an error.")
 (defvar *pipefail* nil  "set -o pipefail: a pipeline fails if any stage fails.")
+(defvar *noclobber* nil "set -C: refuse to truncate an existing file with >.")
+(defvar *noglob* nil    "set -f: disable pathname (glob) expansion.")
+(defvar *xtrace* nil    "set -x: print each command to stderr before running it.")
+
+(defvar *last-bg-pid* nil
+  "PID of the most recently backgrounded pipeline, for $!.")
+
+(defvar *readonly-vars* (make-hash-table :test 'equal)
+  "Names marked read-only via `readonly`; assigning to one is an error.")
+
+(defvar *traps* (make-hash-table :test 'equal)
+  "Trap actions keyed by condition name (\"EXIT\", \"INT\", \"TERM\", ...).")
 
 (defvar *condition-context* nil
   "True while running a command whose failure is expected (if/while conditions,
 &&/|| operands, negations) -- suppresses errexit.")
+
+(defvar *clause-negated* nil
+  "True when the clause just run was a ! -negated pipeline; POSIX exempts these
+from errexit.")
 
 (defvar *pipestatus* '(0)
   "Exit statuses of the stages of the most recent pipeline, in order.")
