@@ -230,7 +230,12 @@ supplies its own unset handling, so set -u should not error while reading name."
 ;;; --- Globbing -----------------------------------------------------------
 
 (defun wildcard-p (s)
-  (or (find #\* s) (find #\? s) (find #\[ s)))
+  "True if S is an actual glob pattern.  A `[` counts only when a `]` follows it
+(a lone `[`, as in the `[` test command, is a literal -- treating it as a glob
+would pointlessly read the whole directory on every `[ ... ]`)."
+  (or (find #\* s) (find #\? s)
+      (let ((lb (position #\[ s)))
+        (and lb (position #\] s :start (1+ lb)) t))))
 
 (defun fnmatch (pattern name)
   "Match a single path segment NAME against PATTERN (* ? and [..] classes).
@@ -1000,11 +1005,12 @@ word is kept); an unquoted word that expanded to nothing is dropped."
                  ;; unless it is a genuine (possibly empty) IFS-split field.
                  ((and (zerop (length text)) (not (word-quoted w)) (not (word-from-split w)))
                   nil)
-                 ;; Glob when an UNQUOTED metacharacter appeared (even if another
-                 ;; part of the word was quoted: "$dir"/*.c, "a"*, *".c"), or when
-                 ;; a fully-unquoted word's text is a wildcard (e.g. from $var).
+                 ;; Glob when TEXT is an actual glob pattern and either an
+                 ;; unquoted metacharacter appeared ("$dir"/*.c, "a"*, *".c") or
+                 ;; the whole word is unquoted (e.g. a wildcard from $var).  The
+                 ;; wildcard-p gate keeps a bare `[` (the test command) literal.
                  ((and (not *noglob*)
-                       (or (word-has-glob w)
-                           (and (not (word-quoted w)) (wildcard-p text))))
+                       (wildcard-p text)
+                       (or (word-has-glob w) (not (word-quoted w))))
                   (or (glob-expand text) (list text)))
                  (t (list text)))))

@@ -1174,3 +1174,16 @@ Shell globals are freshly bound so tests do not leak state into each other."
   (is (member "SBSH_CVAR" (sbsh::variable-name-candidates "SBSH_CV") :test #'string=))
   (is (null (sbsh::variable-name-candidates "SBSH_CVAR_NOPE_ZZZ")))
   (sb-posix:unsetenv "SBSH_CVAR"))
+
+;;; --- A lone `[` is a literal, not a glob (perf + correctness) ----------
+(test wildcard-lone-bracket
+  (is-false (sbsh::wildcard-p "["))        ; the `[` test command
+  (is-false (sbsh::wildcard-p "a[b"))      ; unterminated bracket
+  (is-false (sbsh::wildcard-p "]"))
+  (is-true  (sbsh::wildcard-p "[abc]"))    ; a real bracket expression
+  (is-true  (sbsh::wildcard-p "file[0-9]"))
+  (is-true  (sbsh::wildcard-p "*.c"))
+  (is-true  (sbsh::wildcard-p "a?b"))
+  ;; the [ / ] test words are not globbed (stay literal, no directory read)
+  (is (equal '("[") (sbsh::expand-words (sbsh::tokenize "["))))
+  (is (equal '("]") (sbsh::expand-words (sbsh::tokenize "]")))))
