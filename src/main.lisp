@@ -40,9 +40,32 @@ being swallowed by the runtime."
                      sb-posix:sigint sb-posix:sigpipe sb-posix:sigalrm))
     (ignore-errors (sb-sys:enable-interrupt sig :default))))
 
+(defun consume-shell-flags (args)
+  "Apply leading set-style option flags (-e -u -x -f -C, -o NAME, and the
+accepted no-ops -i -s -v) from ARGS, returning the remaining args.  Stops at the
+first non-flag, at --, or at a bundle containing a letter we don't handle here
+(e.g. -c, which introduces a command)."
+  (let ((known "euxfCis"))          ; note: -v is sbsh's --version, not verbose
+    (loop while (and args
+                     (let ((a (first args)))
+                       (and (>= (length a) 2) (member (char a 0) '(#\- #\+))
+                            (not (string= a "--"))
+                            (or (member a '("-o" "+o") :test #'string=)
+                                (every (lambda (ch) (find ch known)) (subseq a 1))))))
+          do (let ((a (pop args)))
+               (if (member a '("-o" "+o") :test #'string=)
+                   (when args (set-o-option (pop args) (string= a "-o")))
+                   (let ((on (char= (char a 0) #\-)))
+                     (loop for c across (subseq a 1) do
+                       (case c
+                         (#\e (setf *errexit* on)) (#\u (setf *nounset* on))
+                         (#\x (setf *xtrace* on)) (#\f (setf *noglob* on))
+                         (#\C (setf *noclobber* on))))))))    ; -i -s -v: accepted, no-op
+    args))
+
 (defun main ()
   "Program entry point; dispatches between -c, script, and interactive use."
-  (let ((args (rest sb-ext:*posix-argv*)))
+  (let ((args (consume-shell-flags (rest sb-ext:*posix-argv*))))
     (handler-case
         (cond
           ((null args)

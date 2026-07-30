@@ -1116,3 +1116,36 @@ Shell globals are freshly bound so tests do not leak state into each other."
       (sbsh::run-getopts "a" "O" '("-Z"))
       (is (string= "?" (sbsh::getenv "O")))))
   (mapc #'sb-posix:unsetenv '("O" "OPTARG" "OPTIND")))
+
+;;; --- trap validation / reset, cd CDPATH, command-line flags -----------
+(test trap-builtin-validation
+  (let ((sbsh::*traps* (make-hash-table :test 'equal))
+        (*error-output* (make-broadcast-stream)))
+    (is-true  (sbsh::trap-valid-p "EXIT"))
+    (is-true  (sbsh::trap-valid-p "INT"))
+    (is-false (sbsh::trap-valid-p "INVALID"))
+    (is (= 1 (sbsh::run-builtin "trap" '("echo x" "SIGINVALID"))))  ; bad signal -> nonzero
+    (is (= 1 (sbsh::run-builtin "trap" '("echo x"))))               ; no conditions -> nonzero
+    (is (= 0 (sbsh::run-builtin "trap" '("--" "echo bye" "EXIT")))) ; -- ends options
+    (is (string= "echo bye" (gethash "EXIT" sbsh::*traps*)))
+    (is (= 0 (sbsh::run-builtin "trap" '("0"))))                    ; numeric first arg = reset
+    (is (null (gethash "EXIT" sbsh::*traps*)))))
+
+(test cd-cdpath-resolution
+  (is (equal '("/x" nil)  (multiple-value-list (sbsh::cd-via-cdpath "/x"))))    ; absolute
+  (is (equal '("./x" nil) (multiple-value-list (sbsh::cd-via-cdpath "./x"))))   ; dotted
+  (sb-posix:setenv "CDPATH" "/" 1)
+  (multiple-value-bind (p used) (sbsh::cd-via-cdpath "tmp")       ; /tmp exists
+    (is (string= "/tmp" p))
+    (is-true used))
+  (sb-posix:unsetenv "CDPATH"))
+
+(test shell-flag-parsing
+  (let ((sbsh::*errexit* nil) (sbsh::*nounset* nil))
+    (is (equal '("-c" "cmd") (sbsh::consume-shell-flags '("-e" "-u" "-c" "cmd"))))
+    (is-true sbsh::*errexit*) (is-true sbsh::*nounset*))
+  (let ((sbsh::*nounset* nil))
+    (is (equal '("script") (sbsh::consume-shell-flags '("-o" "nounset" "script"))))
+    (is-true sbsh::*nounset*))
+  (is (equal '("-v")     (sbsh::consume-shell-flags '("-v"))))     ; -v is --version
+  (is (equal '("-c" "x") (sbsh::consume-shell-flags '("-c" "x")))))  ; -c introduces a command

@@ -46,15 +46,30 @@ symlinks), so cd keeps the logical path like bash's default."
   (sb-posix:setenv "PWD" logical 1)
   logical)
 
+(defun cd-via-cdpath (target)
+  "Resolve a bare relative TARGET through $CDPATH.  Returns (values PATH USED),
+USED true when a $CDPATH entry supplied the directory (POSIX then prints it)."
+  (if (or (char= (char target 0) #\/)
+          (starts-with-subseq "./" target) (starts-with-subseq "../" target)
+          (string= target ".") (string= target ".."))
+      (values target nil)
+      (dolist (dir (split-on-char (or (getenv "CDPATH") "") #\:) (values target nil))
+        (let* ((base (if (string= dir "") "." (string-right-trim "/" dir)))
+               (cand (concatenate 'string base "/" target)))
+          (when (test-dir-p cand)
+            (return (values cand (not (string= dir "")))))))))
+
 (defun change-directory (target)
   (let* ((old (or (getenv "PWD") (ignore-errors (sb-posix:getcwd)) "/"))
+         (via-cdpath nil)
          (dest (cond
                  ((null target) (or (getenv "HOME") "/"))
                  ((string= target "-")
                   (or (getenv "OLDPWD")
                       (progn (format *error-output* "cd: OLDPWD not set~%")
                              (return-from change-directory 1))))
-                 (t (expand-tilde target))))
+                 (t (multiple-value-bind (p used) (cd-via-cdpath (expand-tilde target))
+                      (setf via-cdpath used) p))))
          (logical (logical-path dest)))
     (handler-case
         (progn
@@ -65,7 +80,7 @@ symlinks), so cd keeps the logical path like bash's default."
               (setf logical (sb-posix:getcwd))))
           (update-cwd logical (sb-posix:getcwd))
           (sb-posix:setenv "OLDPWD" old 1)
-          (when (and target (string= target "-"))
+          (when (or (and target (string= target "-")) via-cdpath)
             (format t "~A~%" logical))
           (run-cd-hooks logical)
           0)
@@ -96,6 +111,7 @@ Names containing a slash are returned as-is if they exist."
 ;;; --- Builtins -----------------------------------------------------------
 
 (define-builtin "cd" (args)
+  (when (and args (string= (first args) "--")) (setf args (rest args)))  ; -- ends options
   (change-directory (first args)))
 
 (define-builtin "pwd" (args)
@@ -157,6 +173,10 @@ can report failure and exit non-zero)."
     ((string= name "noclobber") (setf *noclobber* on) t)
     ((string= name "noglob") (setf *noglob* on) t)
     ((string= name "xtrace") (setf *xtrace* on) t)
+    ;; accepted but not acted on (line-editor modes, etc.)
+    ((member name '("vi" "emacs" "ignoreeof" "monitor" "notify" "interactive-comments")
+             :test #'string=)
+     t)
     (t (format *error-output* "set: ~A: invalid option name~%" name) nil)))
 
 (defun print-set-options ()
@@ -509,23 +529,40 @@ shell's exit status is preserved across the trap unless the trap itself calls
         (setf *last-status* (or trap-exit saved))
         (when trap-exit (setf *should-exit* trap-exit))))))
 
+(defun trap-valid-p (name)
+  "True if NAME (already normalized) is a trappable condition."
+  (or (string= name "EXIT") (and (signal-number name) t)))
+
 (define-builtin "trap" (args)
+  (when (and args (string= (first args) "--")) (setf args (rest args)))  ; -- ends options
   (cond
     ((or (null args) (and (string= (first args) "-p") (null (rest args))))
      (maphash (lambda (k v) (format t "trap -- '~A' ~A~%" v k)) *traps*)
      0)
-    (t (let ((action (first args)) (names (rest args)))
-         ;; `trap - SIG` (or an empty/`-` action) resets the trap.
-         (dolist (spec names)
-           (let ((name (normalize-trap-name spec)))
-             (cond
-               ((string= action "-")
-                (remhash name *traps*)
-                (let ((num (signal-number name)))
-                  (when num (ignore-errors (sb-sys:enable-interrupt num :default)))))
-               (t (setf (gethash name *traps*) action)
-                  (unless (string= name "EXIT") (install-trap-handler name))))))
-         0))))
+    (t
+     (let* ((first-arg (first args))
+            ;; POSIX: `trap - SIG...` and `trap N [N...]` (a leading unsigned
+            ;; integer) both mean "reset these conditions"; otherwise the first
+            ;; operand is the action.
+            (reset (or (string= first-arg "-")
+                       (and (plusp (length first-arg)) (every #'digit-char-p first-arg))))
+            (action (if reset nil first-arg))
+            (names (if reset args (rest args))))
+       (if (null names)
+           (progn (format *error-output* "trap: usage: trap [action] condition ...~%") 1)
+           (let ((status 0))
+             (dolist (spec names)
+               (let ((name (normalize-trap-name spec)))
+                 (cond
+                   ((not (trap-valid-p name))
+                    (format *error-output* "trap: ~A: bad trap~%" spec) (setf status 1))
+                   (reset
+                    (remhash name *traps*)
+                    (let ((num (signal-number name)))
+                      (when num (ignore-errors (sb-sys:enable-interrupt num :default)))))
+                   (t (setf (gethash name *traps*) action)
+                      (unless (string= name "EXIT") (install-trap-handler name))))))
+             status))))))
 
 ;;; --- getopts -----------------------------------------------------------
 
