@@ -1,0 +1,5 @@
+[submodule "test/spec/oils"]
+	path = test/spec/oils
+	url = https://github.com/oils-for-unix/oils
+	shallow = true
+	sparse-checkout = spec

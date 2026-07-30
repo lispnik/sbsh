@@ -11,3 +11,6 @@
 
 # Shell history produced at runtime
 .sbsh_history
+
+# Python cache from test/spec/run.py
+__pycache__/

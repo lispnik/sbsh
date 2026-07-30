@@ -1,0 +1,244 @@
+# sbsh differential conformance corpus.
+#
+# Each case is separated by a line of "===".  A case is:
+#   name: <short name>
+#   <command...>                 (sent to BOTH sbsh and dash)
+# or, when the syntax legitimately differs between the shells:
+#   name: <short name>
+#   sbsh: <command for sbsh>
+#   dash: <command for dash>
+#
+# The runner compares stdout + exit status (NOT stderr, whose wording differs).
+# Cases run in a scratch dir seeded with: a1 a2 a3 file.c foo.c existing three.txt
+
+# ---- arithmetic ----
+name: arith basic
+echo $((1 + 2*3))
+===
+name: arith precedence parens
+echo $((2*(3+4)))
+===
+name: arith mod and div
+echo $((17/5)) $((17%5))
+===
+name: arith comparison
+echo $((3>2)) $((2>3)) $((3==3))
+===
+name: arith logical
+echo $((1 && 0)) $((1 || 0))
+===
+name: arith var no dollar
+n=5; echo $((n+1))
+===
+name: arith var dollar
+n=5; echo $(($n*2))
+===
+name: arith loop counter
+i=0; while [ $i -lt 4 ]; do i=$((i+1)); done; echo $i
+===
+name: arith hex
+echo $((0x1f + 1))
+===
+# ---- parameter expansion ----
+name: default value colon
+unset x; echo ${x:-default}
+===
+name: assign default
+unset x; echo ${x:=assigned} $x
+===
+name: alternate value
+x=set; echo ${x:+yes}
+===
+name: length
+x=hello; echo ${#x}
+===
+name: prefix removal
+p=a/b/c; echo ${p#*/}
+===
+name: prefix removal greedy
+p=a/b/c; echo ${p##*/}
+===
+name: suffix removal
+f=foo.tar.gz; echo ${f%.*}
+===
+name: suffix removal greedy
+f=foo.tar.gz; echo ${f%%.*}
+===
+name: substring
+s=abcdef; echo ${s#ab}
+===
+name: positional count
+set -- a b c d; echo $#
+===
+name: at splits
+set -- a b c; printf "[%s]" "$@"; echo
+===
+name: star joins
+set -- a b c; printf "[%s]" "$*"; echo
+===
+name: at embedded
+set -- p q; printf "[%s]" "x$@y"; echo
+===
+name: at in assignment joins
+set -- a b c; v="$@"; echo "[$v]"
+===
+name: nounset default ok
+set -u; echo ${z:-ok}
+===
+# ---- quoting ----
+name: single quote literal
+echo 'a$b `c` "d"'
+===
+name: double quote expand
+x=hi; echo "val=$x end"
+===
+name: backslash escape dollar
+echo "literal \$x"
+===
+name: adjacent quotes concat
+echo a"b"'c'd
+===
+name: empty quoted arg kept
+printf "[%s]" "" x; echo
+===
+# ---- globbing (fixture dir) ----
+name: glob star
+echo *.c
+===
+name: glob quoted-adjacent
+echo "f"*.c
+===
+name: glob no match literal
+echo nomatch*.zzz
+===
+name: glob question
+echo a?
+===
+name: glob class
+echo [af]*
+===
+name: noglob
+set -f; echo *.c
+===
+# ---- control flow ----
+name: if true
+if true; then echo yes; else echo no; fi
+===
+name: if false
+if false; then echo yes; else echo no; fi
+===
+name: for loop
+for i in a b c; do printf "%s." $i; done; echo
+===
+name: while loop
+n=0; while [ $n -lt 3 ]; do echo $n; n=$((n+1)); done
+===
+name: until loop
+n=0; until [ $n -ge 2 ]; do echo $n; n=$((n+1)); done
+===
+name: case match
+case foo in f*) echo star;; bar) echo bar;; esac
+===
+name: case alternatives
+case b in a|b|c) echo abc;; *) echo no;; esac
+===
+name: break inner
+for i in 1 2 3; do for j in a b; do echo $i$j; break; done; done
+===
+name: break 2
+for i in 1 2 3; do for j in a b; do echo $i$j; break 2; done; done
+===
+name: continue
+for i in 1 2 3; do [ $i = 2 ] && continue; echo $i; done
+===
+name: nested functions
+f() { echo "in $1"; }; g() { f hello; }; g
+===
+name: function return status
+f() { return 3; }; f; echo $?
+===
+# ---- operators / status ----
+name: and-or short circuit
+false && echo a || echo b
+===
+name: pipeline exit
+true | false; echo $?
+===
+name: semicolon sequence
+echo a; echo b; echo c
+===
+name: negation
+! true; echo $?
+===
+name: command substitution
+echo "x$(echo mid)y"
+===
+name: nested command sub
+echo $(echo $(echo deep))
+===
+name: dollar-question after false
+false; echo $?
+===
+# ---- builtins ----
+name: test string equal
+[ abc = abc ]; echo $?
+===
+name: test integer
+[ 3 -lt 5 ]; echo $?
+===
+name: test integer reject
+[ 3x -eq 3 ] 2>/dev/null; echo $?
+===
+name: test parens grouping
+[ \( a = a -o b = c \) -a ! -z x ]; echo $?
+===
+name: shift
+set -- a b c d; shift 2; echo $1
+===
+name: eval
+eval "echo ev; echo al"
+===
+name: read fields
+printf 'one two three\n' | { read a b; echo "[$a][$b]"; }
+===
+name: read escaped space
+printf 'a\\ b\n' | { read x; echo "[$x]"; }
+===
+name: exit code masking
+sh -c 'exit 257'; echo $?
+===
+# ---- redirection ----
+name: redirect out and cat
+echo hi > three.txt; cat three.txt
+===
+name: append
+echo a > f; echo b >> f; cat f
+===
+name: stderr to stdout
+sh -c 'echo err 1>&2' 2>&1
+===
+name: fd dup swap
+{ echo O; echo E 1>&2; } 3>&1 1>&2 2>&3 3>&- 2>/dev/null
+===
+name: here-doc
+cat <<EOF
+line1
+line2
+EOF
+===
+# ---- subshell: sbsh uses `subshell { }`, dash uses `( )` ----
+name: subshell cd isolation
+sbsh: cd /; subshell { cd /tmp; }; pwd
+dash: cd /; (cd /tmp); pwd
+===
+name: subshell var isolation
+sbsh: x=out; subshell { x=in; echo $x; }; echo $x
+dash: x=out; (x=in; echo $x); echo $x
+===
+name: subshell exit status
+sbsh: subshell { exit 5; }; echo $?
+dash: (exit 5); echo $?
+===
+name: subshell in pipeline
+sbsh: subshell { echo a; echo b; } | wc -l
+dash: (echo a; echo b) | wc -l

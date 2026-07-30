@@ -3,7 +3,7 @@
 LISP ?= sbcl
 BIN  := sbsh
 
-.PHONY: all build test run clean
+.PHONY: all build test run clean conformance spec
 
 all: build
 
@@ -23,6 +23,17 @@ run:
 	$(LISP) --non-interactive \
 	  --eval '(asdf:load-system :sbsh)' \
 	  --eval '(sbsh:run-shell)'
+
+## Differential conformance check: diff sbsh against dash on a POSIX corpus.
+## Fails if any case diverges.  Requires ./sbsh and dash.
+conformance: build
+	bash test/conformance/run.sh
+
+## Oil/OSH spec-test score: grade sbsh (as a POSIX shell) against the vendored
+## oils spec corpus.  Informational -- prints a score, never fails the build.
+## Requires the git submodule under test/spec/oils (git submodule update --init).
+spec: build
+	python3 test/spec/run.py
 
 clean:
 	rm -f $(BIN)

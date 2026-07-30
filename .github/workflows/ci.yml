@@ -54,3 +54,18 @@ jobs:
           ./sbsh --version
           ./sbsh -c 'echo ci ok | tr a-z A-Z'
           test "$(./sbsh -c 'printf "b\na\nc\n" | sort | tr -d "\n"')" = "abc"
+
+      - name: Install dash (macOS)
+        if: runner.os == 'macOS'
+        run: brew install dash
+
+      # Hard gate: sbsh must agree with dash on a curated POSIX corpus.
+      - name: Differential conformance vs dash
+        run: bash test/conformance/run.sh
+
+      # Informational: grade sbsh against the vendored Oil/OSH spec corpus.
+      - name: Oil/OSH spec-test score
+        if: runner.os == 'Linux'
+        run: |
+          git submodule update --init --depth 1 test/spec/oils
+          python3 test/spec/run.py
