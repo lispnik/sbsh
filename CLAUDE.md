@@ -100,8 +100,10 @@ cannot depend on it, while `grammar.lisp` loads late and can call into `exec`):
 - `builtins.lisp` — built-in commands (`cd`, `export`, `readonly`, `read`,
   `test`/`[`, `set`, `eval`, `.`/`source`, `exec`, `trap`, `getopts`, `jobs`/`fg`/`bg`,
   etc.).
-- `exec.lisp` — the core: `fork`/`exec`, process groups, `tcsetpgrp` handoff,
-  fg/bg, Lisp-stage evaluation, `subshell`/EXIT-trap running, and the
+- `exec.lisp` — the core: external commands are launched with `posix_spawn`
+  (no fork of the SBCL image -- ~250x faster on macOS, ~3x on Linux); builtins,
+  functions, groups, subshells, and Lisp stages run in a forked child.  Process
+  groups, `tcsetpgrp` handoff, fg/bg, Lisp-stage evaluation, `subshell`/EXIT-trap running, and the
   interactive condition system.
 - `grammar.lisp` — compound commands (`if`/`while`/`until`/`for`/`case`,
   `break`/`continue`). A compound is stored by the parser as *raw source text*

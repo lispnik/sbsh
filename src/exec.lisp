@@ -121,9 +121,70 @@ foreground, restore default signal handling, wire up fds, and redirect."
       (when (and fd (> fd 2)) (ignore-errors (sb-posix:close fd))))
     (dolist (r redirs) (apply-child-redir r))))
 
+(defun spawn-redir-oflags (type)
+  (ecase type
+    (:in sb-posix:o-rdonly)
+    (:readwrite (logior sb-posix:o-rdwr sb-posix:o-creat))
+    ((:out :clobber) (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-trunc))
+    (:append (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-append))))
+
+(defun spawnable-redirs-p (redirs)
+  "True if every redirection can be expressed as a posix_spawn file action.
+Heredocs/here-strings (temp-file lifetime) and noclobber (open-time check) stay
+on the fork path."
+  (and (not (and *noclobber* (some (lambda (r) (eq (first r) :out)) redirs)))
+       (every (lambda (r)
+                (member (first r) '(:in :out :append :readwrite :clobber :dup :close)))
+              redirs)))
+
+(defvar *spawn-debug* nil "When set, print posix_spawn failure codes to stderr.")
+
+(defun spawn-external (path argv pgid infd outfd fds-to-close redirs)
+  "Launch external command PATH via posix_spawn -- no fork of the Lisp image.
+Returns the child pid, or NIL if setup failed (caller falls back to fork)."
+  (let ((fa (make-opaque)) (attr (make-opaque)) (sigs (make-opaque))
+        (pidp (sb-alien:make-alien sb-alien:int))
+        (alien-argv (build-argv argv)))
+    (flet ((sap (a) (sb-alien:alien-sap a)))
+      (unwind-protect
+           (progn
+             (%fa-init (sap fa))
+             (%attr-init (sap attr))
+             ;; reset job-control signals + SIGPIPE + SIGCHLD to default in child
+             (%sigemptyset (sap sigs))
+             (dolist (s (list* sb-posix:sigpipe sb-posix:sigchld *jobctl-signals*))
+               (%sigaddset (sap sigs) s))
+             (%attr-setsigdefault (sap attr) (sap sigs))
+             (%attr-setpgroup (sap attr) (if (zerop pgid) 0 pgid))
+             (%attr-setflags (sap attr)
+                             (logior +posix-spawn-setpgroup+ +posix-spawn-setsigdef+))
+             ;; pipe wiring, then close inherited pipe ends, then redirs (win)
+             (unless (= infd 0) (%fa-adddup2 (sap fa) infd 0))
+             (unless (= outfd 1) (%fa-adddup2 (sap fa) outfd 1))
+             (dolist (fd fds-to-close)
+               (when (and fd (> fd 2)) (%fa-addclose (sap fa) fd)))
+             (dolist (r redirs)
+               (destructuring-bind (type fd &optional target) r
+                 (case type
+                   (:close (%fa-addclose (sap fa) fd))
+                   (:dup (%fa-adddup2 (sap fa) target fd))
+                   (t (%fa-addopen (sap fa) fd target (spawn-redir-oflags type) #o644)))))
+             (let ((rc (%posix-spawnp pidp path (sap fa) (sap attr) alien-argv (environ-sap))))
+               (cond ((zerop rc) (sb-alien:deref pidp 0))
+                     (t (when *spawn-debug*
+                          (format *error-output* "sbsh: posix_spawn ~A: errno ~A~%" path rc))
+                        nil))))
+        (ignore-errors (%fa-destroy (sap fa)))
+        (ignore-errors (%attr-destroy (sap attr)))
+        (sb-alien:free-alien fa) (sb-alien:free-alien attr)
+        (sb-alien:free-alien sigs) (sb-alien:free-alien pidp)
+        (sb-alien:free-alien alien-argv)))))
+
 (defun fork-command (cmd pgid infd outfd foreground fds-to-close)
-  "Fork and exec CMD.  Returns the child pid in the parent; never returns in
-the child.  argv is built before the fork so the child does no allocation."
+  "Run CMD as a pipeline stage.  An external command is launched with posix_spawn
+(no fork of the SBCL image); builtins, functions, { } groups, subshells, and
+Lisp stages run in a forked child.  Returns the child pid in the parent; never
+returns in the child.  argv is built before the fork so it does no allocation."
   ;; A Lisp filter stage: fork and run the form as a Lisp filter over stdin.
   (when (command-lisp cmd)
     (let ((pid (sb-posix:fork)))
@@ -148,6 +209,17 @@ the child.  argv is built before the fork so the child does no allocation."
                               (call-shell-function fn (rest (command-argv cmd))))))
                 (finish-output)
                 (sb-ext:exit :code (if (integerp code) code 0) :abort t)))))))
+  ;; Fast path: an external command via posix_spawn (no fork of the image).
+  ;; PREFLIGHT-COMMANDS has already verified the command resolves on $PATH, and
+  ;; posix_spawnp does its own PATH search, so no lookup is needed here; a spawn
+  ;; failure just returns NIL and we fall through to the fork path.
+  (let* ((argv (command-argv cmd))
+         (builtin (and argv (builtin-p (first argv)))))
+    (when (and argv (not builtin) (spawnable-redirs-p (command-redirs cmd)))
+      (let ((pid (spawn-external (first argv) argv pgid infd outfd fds-to-close
+                                 (command-redirs cmd))))
+        (when pid (return-from fork-command pid)))))
+  ;; Fallback (and builtins / empty argv): fork + (builtin | execvp).
   (let* ((argv (command-argv cmd))
          (builtin (and argv (builtin-p (first argv))))
          (alien-argv (and argv (not builtin) (build-argv argv)))
