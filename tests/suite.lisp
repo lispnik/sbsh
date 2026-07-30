@@ -1149,3 +1149,21 @@ Shell globals are freshly bound so tests do not leak state into each other."
     (is-true sbsh::*nounset*))
   (is (equal '("-v")     (sbsh::consume-shell-flags '("-v"))))     ; -v is --version
   (is (equal '("-c" "x") (sbsh::consume-shell-flags '("-c" "x")))))  ; -c introduces a command
+
+;;; --- Heredocs embedded in a multi-line compound body ------------------
+(test embedded-heredoc-extraction
+  (multiple-value-bind (clean bodies)
+      (sbsh::extract-embedded-heredocs
+       (format nil "for i in 1 2; do~%cat <<EOF~%body $i~%EOF~%done"))
+    (is (equal '("body $i")
+               (mapcar (lambda (b) (string-right-trim '(#\Newline) b)) bodies)))
+    (is (null (search "body $i" clean)))     ; body lines removed from command text
+    (is (search "cat <<EOF" clean))           ; the redirection stays
+    (is (search "done" clean)))
+  ;; a plain heredoc (body from subsequent input) is left untouched
+  (multiple-value-bind (clean bodies) (sbsh::extract-embedded-heredocs "cat <<EOF")
+    (is (string= "cat <<EOF" clean))
+    (is (null bodies)))
+  ;; embedded-p detects the delimiter line
+  (is-true  (sbsh::heredoc-embedded-p (format nil "cat <<EOF~%x~%EOF") "EOF" nil))
+  (is-false (sbsh::heredoc-embedded-p "cat <<EOF" "EOF" nil)))

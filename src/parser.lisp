@@ -208,24 +208,69 @@ without expanding or running anything).  Returns an ordered list of
           (t (incf i)))))
     (nreverse specs)))
 
+(defun heredoc-embedded-p (command delim strip)
+  "True if DELIM already appears as its own line within COMMAND -- i.e. the
+heredoc body is embedded in a multi-line command (a compound), rather than
+following on subsequent input."
+  (some (lambda (line) (string= (if strip (strip-leading-tabs line) line) delim))
+        (split-on-char command #\Newline)))
+
 (defun collect-heredoc-bodies (command next-line-fn)
-  "For each heredoc in COMMAND, read body lines (via NEXT-LINE-FN, a function of
-the delimiter returning a string / :EOF / :CANCEL) until the delimiter line.
-Returns the ordered list of body strings, or :CANCEL."
+  "For each heredoc in COMMAND whose body is NOT already embedded, read body
+lines (via NEXT-LINE-FN, a function of the delimiter returning a string /
+:EOF / :CANCEL) until the delimiter line.  Heredocs embedded inside a multi-line
+compound are left in COMMAND and extracted at execution time (see
+EXTRACT-EMBEDDED-HEREDOCS).  Returns the ordered list of body strings, or :CANCEL."
   (let ((bodies '()))
     (dolist (spec (scan-heredocs command) (nreverse bodies))
       (destructuring-bind (delim . strip) spec
-        (let ((lines '()))
-          (loop
-            (let ((line (funcall next-line-fn delim)))
-              (cond
-                ((eq line :eof) (return))
-                ((eq line :cancel) (return-from collect-heredoc-bodies :cancel))
-                (t (let ((line (if strip (strip-leading-tabs line) line)))
-                     (if (string= line delim)
-                         (return)
-                         (push line lines)))))))
-          (push (format nil "~{~A~%~}" (nreverse lines)) bodies))))))
+        (unless (heredoc-embedded-p command delim strip)
+          (let ((lines '()))
+            (loop
+              (let ((line (funcall next-line-fn delim)))
+                (cond
+                  ((eq line :eof) (return))
+                  ((eq line :cancel) (return-from collect-heredoc-bodies :cancel))
+                  (t (let ((line (if strip (strip-leading-tabs line) line)))
+                       (if (string= line delim)
+                           (return)
+                           (push line lines)))))))
+            (push (format nil "~{~A~%~}" (nreverse lines)) bodies)))))))
+
+(defun extract-embedded-heredocs (text)
+  "If TEXT (a multi-line command such as a compound body) contains heredocs whose
+bodies are embedded, pull them out: return (values CLEANED-TEXT BODIES) where the
+body+delimiter lines are removed from TEXT and BODIES is the ordered list of
+heredoc contents.  When TEXT has no embedded heredoc it is returned unchanged.
+Runs at execution time, so a heredoc inside a loop is re-collected (and its
+expansions re-run) on each iteration."
+  (if (not (find #\Newline text))
+      (values text nil)
+      (let ((lines (split-on-char text #\Newline)) (out '()) (bodies '()) (found nil))
+        (loop while lines do
+          (let ((line (pop lines)))
+            (push line out)
+            (dolist (spec (scan-heredocs line))
+              (destructuring-bind (delim . strip) spec
+                ;; Only extract when the delimiter is actually present on a later
+                ;; line: otherwise the body was already collected by the reader
+                ;; (a plain `cmd <<EOF` whose body lives in *heredoc-bodies*), and
+                ;; re-extracting would wrongly swallow following commands.
+                (when (member delim lines
+                              :test (lambda (d l) (string= d (if strip (strip-leading-tabs l) l))))
+                  (setf found t)
+                  (let ((body '()))
+                    (loop
+                      (when (null lines) (return))
+                      (let ((bl (pop lines)))
+                        (let ((stripped (if strip (strip-leading-tabs bl) bl)))
+                          (if (string= stripped delim)
+                              (return)
+                              (push stripped body)))))
+                    (push (format nil "~{~A~%~}" (nreverse body)) bodies)))))))
+        (if found
+            (values (format nil "~{~A~^~%~}" (nreverse out)) (nreverse bodies))
+            (values text nil)))))
 
 (defun read-logical-command (next-fn)
   "Read one complete logical command using NEXT-FN, a function of a context

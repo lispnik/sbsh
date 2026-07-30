@@ -159,8 +159,5 @@ cannot depend on it, while `grammar.lisp` loads late and can call into `exec`):
   can't see an earlier one on the same command (`a=1 b=$a cmd` sees `b` empty).
   This follows from expansion-at-tokenize-time; independent prefix assignments
   (`LANG=C LC_ALL=C sort`) work.
-- A heredoc inside a multi-line compound body (e.g. `cat <<EOF` inside a
-  `for ... done`) is not collected; heredocs work at top level and in
-  single-line pipelines.
 - Aliases are word-level (no embedded pipes/operators).
 - `echo` is POSIX-style: `-n` yes, `-e` no.

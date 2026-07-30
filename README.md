@@ -244,9 +244,6 @@ tests/
 - Prefix assignments are not evaluated strictly left-to-right, so a later one
   cannot see an earlier one on the same command (`a=1 b=$a cmd` sees `b` empty);
   independent prefix assignments (`LANG=C LC_ALL=C sort`) work as expected.
-- A here-document whose body lies inside a multi-line compound body
-  (e.g. a `cat <<EOF` inside a `for … done`) is not collected — heredocs work
-  at the top level and in single-line pipelines.
 - Aliases are word-level (no embedded pipes/operators).
 - `echo` is POSIX-style (supports `-n`, not `-e`).
 - Globbing follows the usual dotfile rule (a leading `.` must be matched

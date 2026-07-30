@@ -441,7 +441,12 @@ is applied only for that command and undone afterwards via *ASSIGNMENT-RESTORES*
   "Parse and execute a full command line, honoring && || ; & connectors.
 Each clause is tokenized/parsed lazily, right before it runs, so expansions
 reflect state produced by earlier clauses on the same line."
-  (let ((run-next t) (clauses (validate-clauses (split-clauses string))))
+  (multiple-value-bind (string embedded) (extract-embedded-heredocs string)
+   ;; Heredocs embedded in a multi-line compound body are extracted here (each
+   ;; execution, so loop iterations re-collect them); top-level heredocs already
+   ;; live in *heredoc-bodies*, collected by the reader.
+   (let ((*heredoc-bodies* (if embedded embedded *heredoc-bodies*)))
+    (let ((run-next t) (clauses (validate-clauses (split-clauses string))))
     (loop for (cl . rest) on clauses
           for term = (getf cl :terminator)
           ;; A clause that feeds a && / || (or is a && / || operand) is a
@@ -461,7 +466,7 @@ reflect state produced by earlier clauses on the same line."
                      (:or (not (zerop *last-status*)))
                      (t t)))
              (when *should-exit* (return))))
-  *last-status*)
+    *last-status*)))
 
 (defun run-clause (text term)
   "Parse and run one clause.  Errors are confined to this clause so that
