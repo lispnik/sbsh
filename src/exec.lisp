@@ -221,6 +221,7 @@ the child.  argv is built before the fork so the child does no allocation."
     (and (= (length cmds) 1)
          (not (pipeline-background pipeline))
          (not (command-lisp (first cmds)))
+         (not (command-special (first cmds)))
          (let ((argv (command-argv (first cmds))))
            (or (null argv) (builtin-p (first argv)))))))
 
@@ -323,6 +324,11 @@ is applied only for that command and undone afterwards via *ASSIGNMENT-RESTORES*
          (setf *last-status* 0)))
       (:group
        (run-command-line (first rest)))
+      ;; A subshell body runs like a group, but reaches here only inside a
+      ;; forked child (see %LAUNCH-PIPELINE / FORK-COMMAND), so its cd/env/set
+      ;; side effects stay isolated from the parent shell.
+      (:subshell
+       (run-command-line (first rest)))
       (:compound
        (eval-compound (first rest))))))
 
@@ -367,7 +373,10 @@ is applied only for that command and undone afterwards via *ASSIGNMENT-RESTORES*
     ;; (so they affect the live image / shell state): specials, Lisp, functions.
     (when (and (= (length cmds) 1) (not (pipeline-background pipeline)))
       (let* ((cmd (first cmds)))
-        (when (command-special cmd)
+        ;; Specials run in-process so they affect shell state -- EXCEPT a
+        ;; subshell, which must fork (falls through to the pipeline fork path).
+        (when (and (command-special cmd)
+                   (not (eq (first (command-special cmd)) :subshell)))
           (return-from %launch-pipeline
             (if (command-redirs cmd)
                 (call-with-shell-redirections

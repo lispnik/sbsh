@@ -56,7 +56,7 @@ HELLO
   arbitrarily nested and usable in pipelines.
 - **Shell functions** — `name() { … }` and `function name { … }`, positional
   parameters (`$1`, `$@`, `$#`, …), recursion, `return`, `local`, `{ … }`
-  groups.
+  groups, and `subshell { … }` for a forked, isolated subshell.
 - **Multi-line input** — input continues across lines while it is incomplete:
   an open quote, an unbalanced paren (e.g. a multi-line Lisp form), a trailing
   `\`, or a dangling `|`/`&&`/`||`, with a `>` continuation prompt.
@@ -235,8 +235,10 @@ tests/
 
 - Command substitution `$(…)` is supported (shell and Lisp), but not backticks.
 - `(…)` is a **Lisp filter stage**, not a POSIX subshell, so `(cmd)` runs Lisp
-  rather than forking a subshell — this is a deliberate design choice and the
-  reason POSIX subshells are not available.
+  rather than forking a subshell — a deliberate design choice. For a real forked
+  subshell (isolated `cd`/env/`set`), use the explicit **`subshell { … }`** form:
+  `subshell { cd /tmp && make }` leaves the parent's directory untouched. Note
+  that bare `( … )` from a portable script still means Lisp, not a subshell.
 - `$((…))` is **POSIX integer arithmetic**; expressions that are not valid POSIX
   arithmetic fall back to Common Lisp evaluation (e.g. `$((expt 2 10))`).
 - Prefix assignments are not evaluated strictly left-to-right, so a later one

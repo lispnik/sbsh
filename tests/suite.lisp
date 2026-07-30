@@ -986,3 +986,19 @@ Shell globals are freshly bound so tests do not leak state into each other."
     (setf (gethash "EXIT" sbsh::*traps*) "exit 7") ; trap that exits wins
     (sbsh::run-exit-trap)
     (is (eql 7 sbsh::*should-exit*))))
+
+;;; --- subshell { } : an explicit forked subshell (bare (...) stays Lisp) --
+(test subshell-parsing
+  (is-true  (sbsh::subshell-prefix-p "subshell { cd /tmp; }"))
+  (is-true  (sbsh::subshell-prefix-p "  subshell {ls}"))
+  (is-false (sbsh::subshell-prefix-p "subshells x"))       ; not the keyword
+  (is-false (sbsh::subshell-prefix-p "(sort lines)"))      ; a Lisp stage
+  (let ((cmd (sbsh::parse-stage "subshell { cd /tmp && ls; }")))
+    (is (eq :subshell (first (sbsh::command-special cmd))))
+    (is (search "cd /tmp" (second (sbsh::command-special cmd)))))
+  ;; bare (...) remains a Lisp filter stage, not a subshell
+  (let ((cmd (sbsh::parse-stage "(sort lines)")))
+    (is-true (sbsh::command-lisp cmd))
+    (is (null (sbsh::command-special cmd))))
+  ;; the whole subshell stays one clause (inner && is not a top-level operator)
+  (is (= 1 (length (sbsh::split-clauses "subshell { a && b; }")))))

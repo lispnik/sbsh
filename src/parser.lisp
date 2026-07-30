@@ -383,14 +383,34 @@ quotes and parens, so Lisp forms and $(...) are not split)."
     (if (zerop (length s)) '()
         (command-redir-specs (build-command (tokenize s))))))
 
+(defun subshell-prefix-p (string)
+  "True if STRING is a `subshell { … }` stage (reserved word + a brace group).
+Real POSIX subshells `( … )` are Lisp filter stages in sbsh, so `subshell`
+provides an explicit, unambiguous forked subshell instead."
+  (let ((s (string-left-trim '(#\Space #\Tab #\Newline #\Return) string)))
+    (and (> (length s) 8)
+         (string= "subshell" (subseq s 0 8))
+         (member (char s 8) '(#\Space #\Tab #\Newline #\{)))))
+
 (defun parse-stage (string)
-  "Parse one pipeline stage: a Lisp `(...)` filter, an if/while/for/case
-compound, a { } group, or an ordinary command -- each with any trailing
-redirections applied to the whole construct."
+  "Parse one pipeline stage: a Lisp `(...)` filter, a `subshell { }`, an
+if/while/for/case compound, a { } group, or an ordinary command -- each with
+any trailing redirections applied to the whole construct."
   (cond
     ((lisp-stage-p string)
      (make-command :lisp (let ((*package* *user-package*))
                            (read-from-string string))))
+    ;; subshell { list; } -- run LIST in a forked child (isolated cd/env/set).
+    ((subshell-prefix-p string)
+     (let* ((s (string-left-trim '(#\Space #\Tab #\Newline #\Return) string))
+            (rest (subseq s 8))
+            (open (position #\{ rest))
+            (close (and open (matching-brace rest open))))
+       (if (and open close)
+           (make-command :special (list :subshell (subseq rest (1+ open) close))
+                         :redir-specs (trailing-redirs (subseq rest (1+ close))))
+           (let ((cmd (build-command (tokenize string))))   ; malformed: literal
+             (and (or (command-words cmd) (command-redir-specs cmd)) cmd)))))
     ((compound-stage-p string)
      ;; Split the compound source from any trailing redirections (done > file).
      (let* ((deep (compound-depth-map string))
