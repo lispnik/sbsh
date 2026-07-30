@@ -521,12 +521,17 @@ ${x:-${HOME}} works), or NIL."
   "Binary operator groups from lowest to highest precedence.")
 
 (defun parse-arith-int (s)
-  "Parse S as a decimal or 0x.. hex integer, or NIL if it is not a plain int."
+  "Parse S as a C-style integer literal: 0x.. hex, 0.. octal, or decimal.
+Returns NIL if S is not a valid literal (e.g. 08, or a non-numeric string)."
   (let ((s (string-trim '(#\Space #\Tab) s)))
     (cond
       ((zerop (length s)) nil)
       ((and (> (length s) 2) (char= (char s 0) #\0) (member (char s 1) '(#\x #\X)))
        (ignore-errors (parse-integer s :start 2 :radix 16)))
+      ;; a leading 0 (not 0x) is octal; all remaining digits must be 0-7
+      ((and (> (length s) 1) (char= (char s 0) #\0))
+       (when (every (lambda (c) (digit-char-p c 8)) (subseq s 1))
+         (ignore-errors (parse-integer s :start 1 :radix 8))))
       (t (ignore-errors (parse-integer s))))))
 
 (defun arith-lex (s)
@@ -549,12 +554,17 @@ ${x:-${HOME}} works), or NIL."
              (loop while (and (< j n) (var-name-char-p (char s j))) do (incf j))
              (push (cons :var (subseq s i j)) toks)
              (setf i j)))
-          (t (let ((two (and (< (1+ i) n) (subseq s i (+ i 2)))))
+          (t (let ((three (and (< (+ i 2) n) (subseq s i (+ i 3))))
+                   (two (and (< (1+ i) n) (subseq s i (+ i 2)))))
                (cond
-                 ((and two (member two '("==" "!=" "<=" ">=" "&&" "||" "<<" ">>")
+                 ((and three (member three '("<<=" ">>=") :test #'string=))
+                  (push three toks) (incf i 3))
+                 ((and two (member two '("==" "!=" "<=" ">=" "&&" "||" "<<" ">>"
+                                         "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "++" "--")
                                    :test #'string=))
                   (push two toks) (incf i 2))
-                 ((member c '(#\+ #\- #\* #\/ #\% #\( #\) #\< #\> #\! #\~ #\& #\| #\^))
+                 ((member c '(#\+ #\- #\* #\/ #\% #\( #\) #\< #\> #\! #\~ #\& #\| #\^
+                              #\= #\? #\:))
                   (push (string c) toks) (incf i))
                  (t (error 'arith-error))))))))
     (nreverse toks)))
@@ -574,30 +584,60 @@ ${x:-${HOME}} works), or NIL."
     ((string= op "<<") (ash a b)) ((string= op ">>") (ash a (- b)))
     (t (error 'arith-error))))
 
+(defparameter *arith-assign-ops*
+  '("=" "+=" "-=" "*=" "/=" "%=" "<<=" ">>=" "&=" "|=" "^=")
+  "Assignment operators, lowest precedence and right-associative.")
+
 (defun eval-arithmetic (s)
-  "Evaluate a POSIX integer arithmetic expression S.  A bare name is looked up
-as a shell variable (unset/non-numeric -> 0).  Signals ARITH-ERROR on a syntax
-error so the caller can fall back to Common Lisp evaluation."
+  "Evaluate a POSIX/C integer arithmetic expression S: the usual operators plus
+assignment (= += ...), pre/post ++ and --, and the ?: ternary.  A bare name is a
+shell variable (unset/empty -> 0; a non-numeric value is an error).  Assignments
+update the environment.  Signals ARITH-ERROR on a syntax error so the caller can
+fall back to Common Lisp evaluation."
   (let ((toks (arith-lex s)) (pos 0))
     (when (null toks) (error 'arith-error))
-    (labels ((peek () (and (< pos (length toks)) (nth pos toks)))
+    (labels ((peek (&optional (k 0)) (and (< (+ pos k) (length toks)) (nth (+ pos k) toks)))
              (nxt () (prog1 (nth pos toks) (incf pos)))
-             (var-int (name)
+             (varp (tk) (and (consp tk) (eq (car tk) :var)))
+             (var-ref (name)
                (let ((v (ignore-errors (let ((*nounset* nil)) (var-value name)))))
-                 (or (and v (parse-arith-int v)) 0)))
-             (unary ()
+                 (cond
+                   ((or (null v) (string= v "")) 0)
+                   ((parse-arith-int v))
+                   ;; a set-but-non-numeric value is an arithmetic error (like dash)
+                   (t (error 'expansion-error :message
+                             (format nil "~A: arithmetic expression expected" v))))))
+             (var-set (name val) (sb-posix:setenv name (princ-to-string val) 1) val)
+             (primary ()
                (let ((tk (peek)))
                  (cond
                    ((integerp tk) (nxt) tk)
-                   ((and (consp tk) (eq (car tk) :var)) (nxt) (var-int (cdr tk)))
-                   ((equal tk "(") (nxt) (prog1 (binary 0)
+                   ((varp tk)
+                    (nxt)
+                    (let ((name (cdr tk)))
+                      (cond
+                        ((equal (peek) "++") (nxt) (let ((v (var-ref name))) (var-set name (1+ v)) v))
+                        ((equal (peek) "--") (nxt) (let ((v (var-ref name))) (var-set name (1- v)) v))
+                        (t (var-ref name)))))
+                   ((equal tk "(") (nxt) (prog1 (expr)
                                            (unless (equal (peek) ")") (error 'arith-error))
                                            (nxt)))
+                   (t (error 'arith-error)))))
+             (unary ()
+               (let ((tk (peek)))
+                 (cond
                    ((equal tk "-") (nxt) (- (unary)))
                    ((equal tk "+") (nxt) (unary))
                    ((equal tk "!") (nxt) (if (zerop (unary)) 1 0))
                    ((equal tk "~") (nxt) (lognot (unary)))
-                   (t (error 'arith-error)))))
+                   ((or (equal tk "++") (equal tk "--"))     ; prefix increment
+                    (nxt)
+                    (let ((v (peek)))
+                      (unless (varp v) (error 'arith-error))
+                      (nxt)
+                      (var-set (cdr v) (funcall (if (equal tk "++") #'1+ #'1-)
+                                                (var-ref (cdr v))))))
+                   (t (primary)))))
              (binary (level)
                (if (>= level (length *arith-levels*))
                    (unary)
@@ -605,8 +645,28 @@ error so the caller can fall back to Common Lisp evaluation."
                      (loop for op = (peek)
                            while (and op (member op (nth level *arith-levels*) :test #'equal))
                            do (nxt) (setf left (apply-arith-op op left (binary (1+ level)))))
-                     left))))
-      (prog1 (binary 0)
+                     left)))
+             (ternary ()
+               (let ((c (binary 0)))
+                 (if (equal (peek) "?")
+                     (progn (nxt)
+                            (let ((a (assignment)))
+                              (unless (equal (peek) ":") (error 'arith-error))
+                              (nxt)
+                              (let ((b (assignment)))
+                                (if (/= c 0) a b))))
+                     c)))
+             (assignment ()
+               ;; NAME <assign-op> rhs  (right-associative); else a ternary.
+               (if (and (varp (peek)) (member (peek 1) *arith-assign-ops* :test #'equal))
+                   (let* ((name (cdr (nxt))) (op (nxt)) (rhs (assignment)))
+                     (var-set name (if (string= op "=")
+                                       rhs
+                                       (apply-arith-op (subseq op 0 (1- (length op)))
+                                                       (var-ref name) rhs))))
+                   (ternary)))
+             (expr () (assignment)))
+      (prog1 (expr)
         (when (< pos (length toks)) (error 'arith-error))))))   ; trailing junk
 
 (defun arith-substitute (expr)

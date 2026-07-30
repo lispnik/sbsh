@@ -1029,3 +1029,39 @@ Shell globals are freshly bound so tests do not leak state into each other."
   (multiple-value-bind (names dir base) (sbsh::completion-candidates "" t)
     (declare (ignore dir base))
     (is-true (every (lambda (n) (char= (char n (1- (length n))) #\/)) names))))
+
+;;; --- Arithmetic completeness: assignment, ternary, ++/--, octal --------
+(test arithmetic-extended
+  (is (= 9   (sbsh::eval-arithmetic "011")))         ; octal
+  (is (= 255 (sbsh::eval-arithmetic "0xff")))        ; hex still works
+  (is (= 7   (sbsh::eval-arithmetic "3>2?7:9")))     ; ternary
+  (is (= 9   (sbsh::eval-arithmetic "0>2?7:9")))
+  (is (= 6   (sbsh::eval-arithmetic "1?2?6:7:8")))   ; nested ternary
+  ;; assignment updates a shell variable and returns the value
+  (sb-posix:unsetenv "SBSH_AR")
+  (is (= 5 (sbsh::eval-arithmetic "SBSH_AR=5")))
+  (is (string= "5" (sbsh::getenv "SBSH_AR")))
+  (is (= 8 (sbsh::eval-arithmetic "SBSH_AR+=3")))    ; augmented
+  (is (string= "8" (sbsh::getenv "SBSH_AR")))
+  (is (= 8 (sbsh::eval-arithmetic "SBSH_AR++")))     ; post-incr returns old
+  (is (string= "9" (sbsh::getenv "SBSH_AR")))
+  (is (= 10 (sbsh::eval-arithmetic "++SBSH_AR")))    ; pre-incr returns new
+  (is (string= "10" (sbsh::getenv "SBSH_AR")))
+  (sb-posix:unsetenv "SBSH_AR")
+  ;; unset/empty operand is 0; a set-but-non-numeric operand errors (like dash)
+  (sb-posix:unsetenv "SBSH_UNSET")
+  (is (= 5 (sbsh::eval-arithmetic "SBSH_UNSET+5")))
+  (sb-posix:setenv "SBSH_BAD" "foo" 1)
+  (signals sbsh::expansion-error (sbsh::eval-arithmetic "SBSH_BAD+1"))
+  (sb-posix:unsetenv "SBSH_BAD"))
+
+(test arithmetic-expansion-extended
+  (flet ((e (s) (first (sbsh::expand-words (sbsh::tokenize s)))))
+    (is (string= "9" (e "$((011))")))
+    (is (string= "7" (e "$((1>0?7:8))")))
+    (sb-posix:unsetenv "SBSH_QX")
+    (is (string= "4" (e "$((SBSH_QX=4))")))
+    (is (string= "4" (sbsh::getenv "SBSH_QX")))
+    (sb-posix:unsetenv "SBSH_QX")
+    ;; documented Lisp fallback still works
+    (is (string= "1024" (e "$((expt 2 10))")))))
