@@ -438,6 +438,9 @@ NIL when nothing matches (the caller then keeps the literal word)."
           ((char= c #\$)
            (multiple-value-bind (val ni) (read-variable string (1+ i))
              (write-string val out) (setf i ni)))
+          ((char= c #\`)
+           (multiple-value-bind (val ni) (read-backquoted string (1+ i))
+             (write-string val out) (setf i ni)))
           (t (write-char c out) (incf i)))))))
 
 (defun read-double-quoted-split (string i join-p)
@@ -481,6 +484,9 @@ the text before it joined to the previous field and the text after to the next
             ((char= c #\$)
              (multiple-value-bind (val ni) (read-variable string (1+ i))
                (write-string val out) (setf i ni)))
+            ((char= c #\`)
+             (multiple-value-bind (val ni) (read-backquoted string (1+ i))
+               (write-string val out) (setf i ni)))
             (t (write-char c out) (incf i))))))
     (push (get-output-stream-string out) parts)
     (values (nreverse parts) i)))
@@ -501,6 +507,25 @@ where INNER-TEXT excludes the outer parens.  Tracks nesting and quotes."
                   (return-from read-balanced-parens
                     (values (subseq string start j) (1+ j)))))))
     (error 'shell-parse-error :message "unterminated $( ")))
+
+(defun read-backquoted (string i)
+  "STRING[i] is just after an opening backtick.  Read to the matching unescaped
+backtick, applying the backtick backslash rules (\\` \\$ \\\\ stand for ` $ \\;
+other backslashes are literal), and return (values CAPTURED-OUTPUT INDEX-AFTER),
+where CAPTURED-OUTPUT is the stdout of running the enclosed command."
+  (let ((out (make-string-output-stream)) (n (length string)))
+    (loop
+      (when (>= i n) (error 'shell-parse-error :message "unterminated ` quote"))
+      (let ((c (char string i)))
+        (cond
+          ((char= c #\`)
+           (return (values (command-substitute (get-output-stream-string out)) (1+ i))))
+          ((char= c #\\)
+           (let ((nx (and (< (1+ i) n) (char string (1+ i)))))
+             (if (member nx '(#\` #\$ #\\))
+                 (progn (write-char nx out) (incf i 2))
+                 (progn (write-char c out) (incf i)))))
+          (t (write-char c out) (incf i)))))))
 
 (defun find-matching-brace (string i)
   "STRING[i] is `{`; return the index of the matching `}` (nesting-aware, so
@@ -756,6 +781,9 @@ BODY.  No word-splitting or globbing (single and double quotes are literal)."
             ((char= c #\$)
              (multiple-value-bind (val ni) (read-variable body (1+ i))
                (write-string val out) (setf i ni)))
+            ((char= c #\`)
+             (multiple-value-bind (val ni) (read-backquoted body (1+ i))
+               (write-string val out) (setf i ni)))
             (t (write-char c out) (incf i))))))))
 
 (defun tokenize (string)
@@ -777,6 +805,25 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
                (when cur
                  (push (make-word (get-output-stream-string cur) quoted nil has-glob) tokens)
                  (setf cur nil quoted nil has-glob nil)))
+             ;; Splice an unquoted expansion VAL ($... or `...`) into the current
+             ;; word, word-splitting on IFS -- except in an assignment value
+             ;; (x=$y stays one word).  Extra fields become their own words.
+             (emit-sub (val)
+               (ensure-cur)
+               (let ((sofar (get-output-stream-string cur)))
+                 (write-string sofar cur)
+                 (if (assignment-prefix-p sofar)
+                     (write-string val cur)
+                     (let ((fields (ifs-split val)))
+                       (cond
+                         ((null fields))
+                         ((and (= (length fields) 1) (string= (first fields) val))
+                          (write-string val cur))
+                         (t (write-string (first fields) cur)
+                            (dolist (f (rest fields))
+                              (push (make-word (get-output-stream-string cur) quoted t) tokens)
+                              (setf cur (make-string-output-stream) quoted nil)
+                              (write-string f cur))))))))
              (peek (k) (and (< (+ i k) n) (char string (+ i k)))))
       (loop
         (when (>= i n) (return))
@@ -822,28 +869,14 @@ Performs quote removal and $/~ expansion; globbing is deferred to EXPAND-WORDS."
                (dolist (f (ifs-split p)) (push (make-word f) tokens)))
              (incf i 2))
             ((char= c #\$)
-             (ensure-cur)
              (multiple-value-bind (val ni) (read-variable string (1+ i))
                (setf i ni)
-               ;; Word-split an unquoted expansion on IFS (POSIX), except in an
-               ;; assignment's value (x=$y stays one word).
-               (let ((sofar (get-output-stream-string cur)))
-                 (write-string sofar cur)   ; restore what we consumed to peek
-                 (if (assignment-prefix-p sofar)
-                     (write-string val cur)
-                     (let ((fields (ifs-split val)))
-                       (cond
-                         ((null fields))     ; expanded to nothing
-                         ((and (= (length fields) 1) (string= (first fields) val))
-                          (write-string val cur))
-                         ;; Multiple fields: each becomes its own word.  Mark
-                         ;; them FROM-SPLIT so empty fields (a,,b under IFS=,)
-                         ;; are kept rather than dropped as empty expansions.
-                         (t (write-string (first fields) cur)
-                            (dolist (f (rest fields))
-                              (push (make-word (get-output-stream-string cur) quoted t) tokens)
-                              (setf cur (make-string-output-stream) quoted nil)
-                              (write-string f cur)))))))))
+               (emit-sub val)))
+            ;; `...` command substitution (word-split like an unquoted $(...)).
+            ((char= c #\`)
+             (multiple-value-bind (val ni) (read-backquoted string (1+ i))
+               (setf i ni)
+               (emit-sub val)))
             ((char= c #\|)
              (flush)
              (if (eql (peek 1) #\|) (progn (push :or tokens) (incf i 2))

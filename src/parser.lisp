@@ -40,7 +40,7 @@ multiple lines so it is safe on continued (multi-line) input."
              (keep c)
              (when (< (1+ i) n) (keep (char string (1+ i))))
              (setf boundary nil) (incf i 2))
-            ((or (char= c #\') (char= c #\")) (keep c) (setf q c) (setf boundary nil) (incf i))
+            ((or (char= c #\') (char= c #\") (char= c #\`)) (keep c) (setf q c) (setf boundary nil) (incf i))
             ((char= c #\() (keep c) (incf depth) (setf boundary nil) (incf i))
             ((char= c #\)) (keep c) (when (plusp depth) (decf depth)) (setf boundary nil) (incf i))
             ((and (char= c #\#) boundary (zerop depth))
@@ -82,7 +82,7 @@ lie inside an if/while/for/case compound; FINAL-DEPTH is the unclosed depth."
           (cond
             (q (mark i) (when (char= c q) (setf q nil)) (incf i))
             ((char= c #\\) (mark i) (incf i) (when (< i n) (mark i) (incf i)))
-            ((or (char= c #\') (char= c #\")) (mark i) (setf q c) (incf i) (setf cmdpos nil))
+            ((or (char= c #\') (char= c #\") (char= c #\`)) (mark i) (setf q c) (incf i) (setf cmdpos nil))
             ((member c '(#\Space #\Tab)) (mark i) (incf i))
             ((member c '(#\Newline #\; #\& #\| #\()) (mark i) (incf i) (setf cmdpos t))
             ((char= c #\)) (mark i) (incf i) (setf cmdpos nil))
@@ -128,7 +128,7 @@ form), :BACKSLASH (trailing line-continuation), or :OPERATOR (dangling | && ||).
           ((char= c #\\)
            (if (= i (1- n)) (progn (setf trailing-bs t) (incf i)) (incf i 2))
            (setf boundary nil))
-          ((or (char= c #\') (char= c #\")) (setf q c) (incf i) (setf boundary nil))
+          ((or (char= c #\') (char= c #\") (char= c #\`)) (setf q c) (incf i) (setf boundary nil))
           ((char= c #\() (incf depth) (incf i) (setf boundary t))
           ((char= c #\)) (when (plusp depth) (decf depth)) (incf i) (setf boundary nil))
           ((and (char= c #\{) boundary
@@ -191,7 +191,7 @@ without expanding or running anything).  Returns an ordered list of
                    ((char= c q) (setf q nil) (incf i))
                    (t (incf i))))
           ((char= c #\\) (incf i 2))
-          ((or (char= c #\') (char= c #\")) (setf q c) (incf i))
+          ((or (char= c #\') (char= c #\") (char= c #\`)) (setf q c) (incf i))
           ((char= c #\() (incf depth) (incf i))
           ((char= c #\)) (when (plusp depth) (decf depth)) (incf i))
           ((and (zerop depth) (char= c #\<) (< (1+ i) n) (char= (char string (1+ i)) #\<))
@@ -262,7 +262,7 @@ control operators, honoring quotes.  OP is one of :SEMI :AMP :AND :OR or NIL."
             ((= 1 (sbit deep i)) (incf i) (setf boundary nil))
             (q (when (char= c q) (setf q nil)) (incf i) (setf boundary nil))
             ((char= c #\\) (incf i 2) (setf boundary nil))
-            ((or (char= c #\') (char= c #\")) (setf q c) (incf i) (setf boundary nil))
+            ((or (char= c #\') (char= c #\") (char= c #\`)) (setf q c) (incf i) (setf boundary nil))
             ;; Inside ( ) — a Lisp form or $(...) — nothing is a separator.
             ((char= c #\() (incf depth) (incf i) (setf boundary t))
             ((char= c #\)) (when (plusp depth) (decf depth)) (incf i) (setf boundary nil))
@@ -342,7 +342,7 @@ quotes and parens, so Lisp forms and $(...) are not split)."
           ((= 1 (sbit deep i)) (incf i))   ; inside a compound: | does not split
           (q (when (char= c q) (setf q nil)) (incf i) (setf boundary nil))
           ((char= c #\\) (incf i 2) (setf boundary nil))
-          ((or (char= c #\') (char= c #\")) (setf q c) (incf i) (setf boundary nil))
+          ((or (char= c #\') (char= c #\") (char= c #\`)) (setf q c) (incf i) (setf boundary nil))
           ((char= c #\() (incf depth) (incf i) (setf boundary t))
           ((char= c #\)) (when (plusp depth) (decf depth)) (incf i) (setf boundary nil))
           ((and (char= c #\{) boundary (plusp depth)) (incf i))  ; inside parens, ignore
@@ -372,7 +372,7 @@ quotes and parens, so Lisp forms and $(...) are not split)."
           for c = (char string j)
           do (cond
                (q (when (char= c q) (setf q nil)))
-               ((or (char= c #\') (char= c #\")) (setf q c))
+               ((or (char= c #\') (char= c #\") (char= c #\`)) (setf q c))
                ((char= c #\{) (incf depth))
                ((char= c #\}) (decf depth) (when (zerop depth) (return-from matching-brace j)))))
     nil))
@@ -444,7 +444,7 @@ any trailing redirections applied to the whole construct."
           for c = (char s j)
           do (cond
                (q (when (char= c q) (setf q nil)))
-               ((or (char= c #\') (char= c #\")) (setf q c))
+               ((or (char= c #\') (char= c #\") (char= c #\`)) (setf q c))
                ((char= c #\{) (incf depth))
                ((char= c #\})
                 (decf depth)

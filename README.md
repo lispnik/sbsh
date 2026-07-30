@@ -233,7 +233,7 @@ tests/
 
 ## Notes / limitations
 
-- Command substitution `$(…)` is supported (shell and Lisp), but not backticks.
+- Command substitution: both `$(…)` (shell and Lisp) and backticks `` `…` ``.
 - `(…)` is a **Lisp filter stage**, not a POSIX subshell, so `(cmd)` runs Lisp
   rather than forking a subshell — a deliberate design choice. For a real forked
   subshell (isolated `cd`/env/`set`), use the explicit **`subshell { … }`** form:

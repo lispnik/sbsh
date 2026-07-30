@@ -153,7 +153,6 @@ cannot depend on it, while `grammar.lisp` loads late and can call into `exec`):
 
 ### Known limitations (from README — don't treat as bugs)
 
-- Backticks are not supported (only `$(...)`).
 - Bare `( ... )` is a **Lisp filter stage**, not a POSIX subshell; use
   `subshell { ... }` for a forked, isolated subshell.
 - Prefix assignments are not applied strictly left-to-right, so a later one

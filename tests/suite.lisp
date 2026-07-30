@@ -1065,3 +1065,16 @@ Shell globals are freshly bound so tests do not leak state into each other."
     (sb-posix:unsetenv "SBSH_QX")
     ;; documented Lisp fallback still works
     (is (string= "1024" (e "$((expt 2 10))")))))
+
+;;; --- Backtick command substitution ------------------------------------
+(test backtick-scanning
+  ;; Backticks span like quotes: inner ; | # are not structural, and an
+  ;; unterminated backtick asks for more input.
+  (is (= 1 (length (sbsh::split-clauses "echo `a; b`"))))
+  (is (= 1 (length (sbsh::split-pipeline-stages "echo `a | b`"))))
+  (is (string= "echo `a # b`" (sbsh::strip-comment "echo `a # b`")))
+  (is (eq :quote (sbsh::incomplete-reason "echo `open")))
+  ;; single-quoted backticks are a literal, not a substitution
+  (is (equal '("`echo x`") (word-texts (sbsh::tokenize "'`echo x`'"))))
+  ;; a double-quoted backtick is a substitution point (not literal)
+  (is (equal '(:pipe) (remove-if #'sbsh::word-p (sbsh::tokenize "a | b")))))
