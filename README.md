@@ -64,7 +64,7 @@ HELLO
   (xtrace), `set -f` (noglob), `set -C` (noclobber), `set -o pipefail`,
   `set -- args`; `!` pipeline negation; `$PIPESTATUS` (and `${PIPESTATUS[n]}`).
 - **Builtins** — `cd`, `pwd`, `exit`, `echo`, `export`, `unset`, `readonly`,
-  `env`, `set`, `read`, `shift`, `eval`, `.`/`source`, `exec`, `trap`
+  `env`, `set`, `read`, `shift`, `getopts`, `eval`, `.`/`source`, `exec`, `trap`
   (EXIT + signals), `wait`, `test`/`[` (with `( )` grouping), `return`,
   `local`, `break`, `continue`, `history`, `jobs`, `fg`, `bg`, `kill`, `type`,
   `help`, `alias`, `unalias`, `snapshot`, `true`, `false`, `:`.

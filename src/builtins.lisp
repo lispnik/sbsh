@@ -527,6 +527,79 @@ shell's exit status is preserved across the trap unless the trap itself calls
                   (unless (string= name "EXIT") (install-trap-handler name))))))
          0))))
 
+;;; --- getopts -----------------------------------------------------------
+
+(defvar *getopts-offset* 0
+  "Char index of the next option letter within the current arg (0 = start of a
+fresh arg).  Tracks position through a bundled option group like -abc.")
+(defvar *getopts-last-optind* 0
+  "The OPTIND value getopts last set, to detect an external reset.")
+
+(defun run-getopts (optstring name params)
+  "One step of POSIX getopts over PARAMS, using/updating $OPTIND and $OPTARG and
+storing the found option letter in NAME.  Returns 0 while options remain, 1 when
+done.  A leading ':' in OPTSTRING selects silent error reporting."
+  (let* ((silent (and (plusp (length optstring)) (char= (char optstring 0) #\:)))
+         (optind (or (parse-integer (or (getenv "OPTIND") "1") :junk-allowed t) 1)))
+    (when (/= optind *getopts-last-optind*) (setf *getopts-offset* 0))  ; external reset
+    (labels ((done (oi) (sb-posix:setenv "OPTIND" (princ-to-string oi) 1)
+                        (setf *getopts-last-optind* oi *getopts-offset* 0) 1)
+             (found (oi code) (sb-posix:setenv "OPTIND" (princ-to-string oi) 1)
+                              (setf *getopts-last-optind* oi) code)
+             (takes-arg (ch)
+               (let ((p (position ch optstring)))
+                 (and p (< (1+ p) (length optstring)) (char= (char optstring (1+ p)) #\:))))
+             (known (ch) (and (char/= ch #\:) (find ch optstring))))
+      (loop
+        (when (> optind (length params)) (return (done optind)))
+        (let ((cur (nth (1- optind) params)))
+          (when (<= *getopts-offset* 0)                 ; validate start of a new arg
+            (cond
+              ((or (zerop (length cur)) (char/= (char cur 0) #\-) (string= cur "-"))
+               (return (done optind)))
+              ((string= cur "--") (return (done (1+ optind))))
+              (t (setf *getopts-offset* 1))))
+          (let* ((ch (char cur *getopts-offset*)))
+            (incf *getopts-offset*)
+            (let ((at-end (>= *getopts-offset* (length cur))))
+              (when at-end (setf *getopts-offset* 0))
+              (flet ((next-arg () (if at-end (1+ optind) optind)))
+                (cond
+                  ((not (known ch))                     ; unknown option
+                   (if silent
+                       (progn (sb-posix:setenv name "?" 1) (sb-posix:setenv "OPTARG" (string ch) 1))
+                       (progn (format *error-output* "getopts: illegal option -- ~C~%" ch)
+                              (sb-posix:setenv name "?" 1) (sb-posix:setenv "OPTARG" "" 1)))
+                   (return (found (next-arg) 0)))
+                  ((takes-arg ch)                       ; option that needs an argument
+                   (cond
+                     ((not at-end)                      ; arg = rest of this arg
+                      (sb-posix:setenv "OPTARG" (subseq cur *getopts-offset*) 1)
+                      (sb-posix:setenv name (string ch) 1)
+                      (setf *getopts-offset* 0)
+                      (return (found (1+ optind) 0)))
+                     ((< optind (length params))        ; arg = the next parameter
+                      (sb-posix:setenv "OPTARG" (nth optind params) 1)
+                      (sb-posix:setenv name (string ch) 1)
+                      (return (found (+ optind 2) 0)))
+                     (silent                            ; missing arg, silent
+                      (sb-posix:setenv name ":" 1) (sb-posix:setenv "OPTARG" (string ch) 1)
+                      (return (found (1+ optind) 0)))
+                     (t                                 ; missing arg, verbose
+                      (format *error-output* "getopts: option requires an argument -- ~C~%" ch)
+                      (sb-posix:setenv name "?" 1) (sb-posix:setenv "OPTARG" "" 1)
+                      (return (found (1+ optind) 0)))))
+                  (t                                    ; plain option, no argument
+                   (sb-posix:setenv name (string ch) 1)
+                   (sb-posix:setenv "OPTARG" "" 1)
+                   (return (found (next-arg) 0))))))))))))
+
+(define-builtin "getopts" (args)
+  (if (< (length args) 2)
+      (progn (format *error-output* "getopts: usage: getopts optstring name [arg ...]~%") 2)
+      (run-getopts (first args) (second args)
+                   (if (cddr args) (cddr args) *positional*))))
+
 (define-builtin "wait" (args)
   "Block until all child processes have finished."
   (declare (ignore args))

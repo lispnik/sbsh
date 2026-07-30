@@ -98,7 +98,7 @@ cannot depend on it, while `grammar.lisp` loads late and can call into `exec`):
   (syntax errors for stray/empty control operators).
 - `jobs.lisp` — job/process tracking, `waitpid` reaping.
 - `builtins.lisp` — built-in commands (`cd`, `export`, `readonly`, `read`,
-  `test`/`[`, `set`, `eval`, `.`/`source`, `exec`, `trap`, `jobs`/`fg`/`bg`,
+  `test`/`[`, `set`, `eval`, `.`/`source`, `exec`, `trap`, `getopts`, `jobs`/`fg`/`bg`,
   etc.).
 - `exec.lisp` — the core: `fork`/`exec`, process groups, `tcsetpgrp` handoff,
   fg/bg, Lisp-stage evaluation, `subshell`/EXIT-trap running, and the

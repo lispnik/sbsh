@@ -1078,3 +1078,41 @@ Shell globals are freshly bound so tests do not leak state into each other."
   (is (equal '("`echo x`") (word-texts (sbsh::tokenize "'`echo x`'"))))
   ;; a double-quoted backtick is a substitution point (not literal)
   (is (equal '(:pipe) (remove-if #'sbsh::word-p (sbsh::tokenize "a | b")))))
+
+;;; --- getopts builtin --------------------------------------------------
+(test getopts-parsing
+  (let ((sbsh::*getopts-offset* 0) (sbsh::*getopts-last-optind* 0)
+        (params '("-a" "-b" "val" "-c" "x")))
+    (sb-posix:setenv "OPTIND" "1" 1)
+    (is (= 0 (sbsh::run-getopts "ab:c" "OPT" params)))
+    (is (string= "a" (sbsh::getenv "OPT")))
+    (is (= 0 (sbsh::run-getopts "ab:c" "OPT" params)))
+    (is (string= "b" (sbsh::getenv "OPT")))
+    (is (string= "val" (sbsh::getenv "OPTARG")))       ; option argument
+    (is (= 0 (sbsh::run-getopts "ab:c" "OPT" params)))
+    (is (string= "c" (sbsh::getenv "OPT")))
+    (is (= 1 (sbsh::run-getopts "ab:c" "OPT" params)))  ; done
+    (is (string= "5" (sbsh::getenv "OPTIND"))))         ; points past the options
+  (mapc #'sb-posix:unsetenv '("OPT" "OPTARG" "OPTIND")))
+
+(test getopts-bundled-and-errors
+  (let ((*error-output* (make-broadcast-stream)))       ; silence diagnostics
+    ;; bundled -abc yields a, b, c across successive calls
+    (let ((sbsh::*getopts-offset* 0) (sbsh::*getopts-last-optind* 0) (p '("-abc")))
+      (sb-posix:setenv "OPTIND" "1" 1)
+      (sbsh::run-getopts "abc" "O" p) (is (string= "a" (sbsh::getenv "O")))
+      (sbsh::run-getopts "abc" "O" p) (is (string= "b" (sbsh::getenv "O")))
+      (sbsh::run-getopts "abc" "O" p) (is (string= "c" (sbsh::getenv "O")))
+      (is (= 1 (sbsh::run-getopts "abc" "O" p))))
+    ;; silent mode, missing argument -> name ":", OPTARG = the option letter
+    (let ((sbsh::*getopts-offset* 0) (sbsh::*getopts-last-optind* 0))
+      (sb-posix:setenv "OPTIND" "1" 1)
+      (sbsh::run-getopts ":b:" "O" '("-b"))
+      (is (string= ":" (sbsh::getenv "O")))
+      (is (string= "b" (sbsh::getenv "OPTARG"))))
+    ;; unknown option -> name "?"
+    (let ((sbsh::*getopts-offset* 0) (sbsh::*getopts-last-optind* 0))
+      (sb-posix:setenv "OPTIND" "1" 1)
+      (sbsh::run-getopts "a" "O" '("-Z"))
+      (is (string= "?" (sbsh::getenv "O")))))
+  (mapc #'sb-posix:unsetenv '("O" "OPTARG" "OPTIND")))
