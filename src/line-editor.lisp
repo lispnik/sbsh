@@ -206,6 +206,16 @@ the line or right after a | & ; or an opening ( / {."
           do (decf i))
     (first-word (subseq text (1+ i) (min start (length text))))))
 
+(defun variable-name-candidates (prefix)
+  "Environment variable names beginning with PREFIX (for $VAR completion)."
+  (let ((names '()))
+    (dolist (kv (sb-ext:posix-environ))
+      (let ((eq (position #\= kv)))
+        (when eq
+          (let ((n (subseq kv 0 eq)))
+            (when (starts-with-subseq prefix n) (push n names))))))
+    (sort (remove-duplicates names :test #'string=) #'string<)))
+
 (defun command-name-candidates (prefix)
   "Command names starting with PREFIX: builtins, shell functions, aliases, and
 executables found on $PATH."
@@ -269,8 +279,23 @@ several remain, print DISPLAY as choices and repaint."
     (multiple-value-bind (start end) (current-token-bounds text point)
       (let* ((token (subseq text start end))
              (cmd (segment-command text start))
-             (custom (gethash cmd *completions*)))
+             (custom (gethash cmd *completions*))
+             (dollar (position #\$ token :from-end t)))
         (cond
+          ;; $VAR / ${VAR : complete environment variable names
+          ((and dollar
+                (let* ((after (subseq token (1+ dollar)))
+                       (braced (and (plusp (length after)) (char= (char after 0) #\{))))
+                  (every #'var-name-char-p (subseq after (if braced 1 0)))))
+           (let* ((after (subseq token (1+ dollar)))
+                  (braced (and (plusp (length after)) (char= (char after 0) #\{)))
+                  (vprefix (subseq after (if braced 1 0)))
+                  (names (variable-name-candidates vprefix)))
+             (apply-completion ed (+ start dollar 0) end (subseq token dollar)
+                               (mapcar (lambda (n)
+                                         (concatenate 'string "$" (if braced "{" "") n))
+                                       names)
+                               names)))
           ;; completing the command word itself (a bare name, no path separator)
           ((and (command-position-p text start) (not (find #\/ token)))
            (let ((cands (command-name-candidates token)))

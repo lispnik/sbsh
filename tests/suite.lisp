@@ -1167,3 +1167,10 @@ Shell globals are freshly bound so tests do not leak state into each other."
   ;; embedded-p detects the delimiter line
   (is-true  (sbsh::heredoc-embedded-p (format nil "cat <<EOF~%x~%EOF") "EOF" nil))
   (is-false (sbsh::heredoc-embedded-p "cat <<EOF" "EOF" nil)))
+
+;;; --- Variable-name completion -----------------------------------------
+(test completion-variable-names
+  (sb-posix:setenv "SBSH_CVAR" "1" 1)
+  (is (member "SBSH_CVAR" (sbsh::variable-name-candidates "SBSH_CV") :test #'string=))
+  (is (null (sbsh::variable-name-candidates "SBSH_CVAR_NOPE_ZZZ")))
+  (sb-posix:unsetenv "SBSH_CVAR"))

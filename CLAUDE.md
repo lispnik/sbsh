@@ -87,7 +87,7 @@ cannot depend on it, while `grammar.lisp` loads late and can call into `exec`):
 - `line-editor.lisp` — raw-mode readline (keys, history nav, `C-r`, Tab
   completion). Tab completion is **context-aware** (`complete-token`): command
   names in command position (builtins + functions + aliases + `$PATH` +
-  reserved words), directories-only after `cd`, `defcompletion` hooks, else
+  reserved words), directories-only after `cd`, `$VAR` names after a `$`, `defcompletion` hooks, else
   filenames.
 - `lexer.lisp` — tokenizer: quoting, all variable/parameter expansion, `$'...'`
   ANSI-C quoting, POSIX arithmetic `$((...))` (`eval-arithmetic`, falling back
