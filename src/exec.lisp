@@ -111,6 +111,10 @@ foreground, restore default signal handling, wire up fds, and redirect."
     (dolist (sig *jobctl-signals*)
       (ignore-errors (sb-sys:enable-interrupt sig :default)))
     (ignore-errors (sb-sys:enable-interrupt sb-posix:sigchld :default))
+    ;; SBCL ignores SIGPIPE (so writes return EPIPE); restore the default so a
+    ;; builtin/Lisp stage on the left of `... | head` dies cleanly on a broken
+    ;; pipe (status 141) like an external command, instead of erroring or looping.
+    (ignore-errors (sb-sys:enable-interrupt sb-posix:sigpipe :default))
     (unless (= infd 0) (sb-posix:dup2 infd 0))
     (unless (= outfd 1) (sb-posix:dup2 outfd 1))
     (dolist (fd fds-to-close)
@@ -498,6 +502,11 @@ the interactive correction menu (innermost handler) and otherwise fails 127."
       (setf *last-status* 2))
     (sb-posix:syscall-error (e)
       (format *error-output* "sbsh: ~A~%" e)
+      (setf *last-status* 1))
+    (stream-error ()
+      ;; A write/read to a closed or broken fd (e.g. `echo hi >&-`).  Fail the
+      ;; command instead of crashing the shell; the fd is restored by unwind.
+      (ignore-errors (format *error-output* "sbsh: I/O error~%"))
       (setf *last-status* 1))
     (expansion-error (e)
       (format *error-output* "sbsh: ~A~%" e)

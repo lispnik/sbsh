@@ -54,6 +54,8 @@ jobs:
           ./sbsh --version
           ./sbsh -c 'echo ci ok | tr a-z A-Z'
           test "$(./sbsh -c 'printf "b\na\nc\n" | sort | tr -d "\n"')" = "abc"
+          # a builtin/loop on the left of | head must die on SIGPIPE, not hang
+          test "$(./sbsh -c 'i=0; while true; do echo $i; i=$((i+1)); done | head -3' | tr -d "\n")" = "012"
 
       - name: Install dash (macOS)
         if: runner.os == 'macOS'
