@@ -168,8 +168,9 @@ character / :eof."
           do (decf start))
     (values start point)))
 
-(defun completion-candidates (token)
-  "Return a list of filesystem completions for the partial path TOKEN."
+(defun completion-candidates (token &optional only-dirs)
+  "Return a list of filesystem completions for the partial path TOKEN.  When
+ONLY-DIRS, offer only directories (for `cd` and friends)."
   (let* ((expanded (expand-tilde token))
          (slash (position #\/ expanded :from-end t))
          (dir (if slash (subseq expanded 0 (1+ slash)) "./"))
@@ -177,15 +178,53 @@ character / :eof."
          (dirpath (ignore-errors (truename dir))))
     (when dirpath
       (let (names)
-        (dolist (p (ignore-errors (uiop:directory-files dirpath)))
-          (let ((n (unescape-namestring (file-namestring p))))
-            (when (and (plusp (length n)) (starts-with-subseq base n))
-              (push n names))))
+        (unless only-dirs
+          (dolist (p (ignore-errors (uiop:directory-files dirpath)))
+            (let ((n (unescape-namestring (file-namestring p))))
+              (when (and (plusp (length n)) (starts-with-subseq base n))
+                (push n names)))))
         (dolist (p (ignore-errors (uiop:subdirectories dirpath)))
           (let ((n (car (last (pathname-directory p)))))
             (when (and (stringp n) (starts-with-subseq base n))
               (push (concatenate 'string n "/") names))))
         (values (sort names #'string<) dir base)))))
+
+(defparameter *dir-commands* '("cd" "pushd" "popd" "rmdir")
+  "Commands whose arguments complete to directories only.")
+
+(defun command-position-p (text start)
+  "True if the token starting at START is in command position -- at the start of
+the line or right after a | & ; or an opening ( / {."
+  (let ((i (1- start)))
+    (loop while (and (>= i 0) (member (char text i) '(#\Space #\Tab))) do (decf i))
+    (or (< i 0) (member (char text i) '(#\| #\& #\; #\( #\{)))))
+
+(defun segment-command (text start)
+  "The command name of the pipeline segment that contains position START."
+  (let ((i (1- start)))
+    (loop while (and (>= i 0) (not (member (char text i) '(#\| #\& #\; #\( #\{))))
+          do (decf i))
+    (first-word (subseq text (1+ i) (min start (length text))))))
+
+(defun command-name-candidates (prefix)
+  "Command names starting with PREFIX: builtins, shell functions, aliases, and
+executables found on $PATH."
+  (let ((seen (make-hash-table :test 'equal)))
+    (flet ((add (k) (when (and (plusp (length k)) (starts-with-subseq prefix k))
+                      (setf (gethash k seen) t))))
+      (dolist (kw '("if" "then" "else" "elif" "fi" "while" "until" "do" "done"
+                    "for" "in" "case" "esac" "function" "subshell"))
+        (add kw))
+      (maphash (lambda (k v) (declare (ignore v)) (add k)) *builtins*)
+      (maphash (lambda (k v) (declare (ignore v)) (add k)) *functions*)
+      (maphash (lambda (k v) (declare (ignore v)) (add k)) *aliases*)
+      (dolist (dir (split-on-char (or (getenv "PATH") "") #\:))
+        (when (plusp (length dir))
+          (dolist (p (ignore-errors
+                      (uiop:directory-files (concatenate 'string (string-right-trim "/" dir) "/"))))
+            (let ((n (file-namestring p)))
+              (when n (add n)))))))
+    (sort (loop for k being the hash-keys of seen collect k) #'string<)))
 
 (defun longest-common-prefix (strings)
   (if (null strings)
@@ -213,25 +252,40 @@ several remain, print DISPLAY as choices and repaint."
          (out "~%~{~A~^  ~}~%" display)
          (refresh-line ed)))))
 
+(defun complete-filesystem (ed start end token &optional only-dirs)
+  (multiple-value-bind (names dir base) (completion-candidates token only-dirs)
+    (declare (ignore base))
+    (apply-completion ed start end token
+                      (mapcar (lambda (n) (concatenate 'string dir n)) names)
+                      names)))
+
 (defun complete-token (ed)
-  "Complete the token under the cursor: a command-specific completion (from
-DEFCOMPLETION) when one is registered for the command, else a filename."
+  "Complete the token under the cursor, aware of context:
+ - in command position -> command names (builtins, functions, aliases, $PATH);
+ - a command with a DEFCOMPLETION hook -> that completion;
+ - cd/pushd/... -> directories only;
+ - otherwise -> filenames."
   (let* ((text (ed-text ed)) (point (led-point ed)))
     (multiple-value-bind (start end) (current-token-bounds text point)
       (let* ((token (subseq text start end))
-             (cmd (first-word text))
-             (custom (and (> start 0) (gethash cmd *completions*))))
-        (if custom
-            (let ((cands (sort (remove-if-not
-                                (lambda (c) (starts-with-subseq token c))
-                                (ignore-errors (funcall custom token)))
-                               #'string<)))
-              (apply-completion ed start end token cands cands))
-            (multiple-value-bind (names dir base) (completion-candidates token)
-              (declare (ignore base))
-              (apply-completion ed start end token
-                                (mapcar (lambda (n) (concatenate 'string dir n)) names)
-                                names)))))))
+             (cmd (segment-command text start))
+             (custom (gethash cmd *completions*)))
+        (cond
+          ;; completing the command word itself (a bare name, no path separator)
+          ((and (command-position-p text start) (not (find #\/ token)))
+           (let ((cands (command-name-candidates token)))
+             (apply-completion ed start end token cands cands)))
+          ;; a user-registered per-command completion
+          (custom
+           (let ((cands (sort (remove-if-not (lambda (c) (starts-with-subseq token c))
+                                             (ignore-errors (funcall custom token)))
+                              #'string<)))
+             (apply-completion ed start end token cands cands)))
+          ;; cd and friends complete directories only
+          ((member cmd *dir-commands* :test #'string=)
+           (complete-filesystem ed start end token t))
+          ;; default: filenames
+          (t (complete-filesystem ed start end token)))))))
 
 (defun replace-token (ed start end new-text)
   (let ((text (ed-text ed)))

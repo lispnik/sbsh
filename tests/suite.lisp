@@ -1002,3 +1002,30 @@ Shell globals are freshly bound so tests do not leak state into each other."
     (is (null (sbsh::command-special cmd))))
   ;; the whole subshell stays one clause (inner && is not a top-level operator)
   (is (= 1 (length (sbsh::split-clauses "subshell { a && b; }")))))
+
+;;; --- Command-aware tab completion -------------------------------------
+(test completion-command-position
+  (is-true  (sbsh::command-position-p "ls" 0))            ; start of line
+  (is-true  (sbsh::command-position-p "cat x | gr" 8))    ; after |
+  (is-true  (sbsh::command-position-p "a; b" 3))          ; after ;
+  (is-false (sbsh::command-position-p "cat x" 4)))        ; an argument
+
+(test completion-segment-command
+  (is (string= "cat"  (sbsh::segment-command "cat x" 5)))
+  (is (string= "cd"   (sbsh::segment-command "ls | cd " 8)))
+  (is (string= "grep" (sbsh::segment-command "a && grep " 10))))
+
+(test completion-command-names
+  (let ((c (sbsh::command-name-candidates "rea")))
+    (is (member "read"     c :test #'string=))   ; a builtin
+    (is (member "readonly" c :test #'string=)))
+  (is (equal '("subshell") (sbsh::command-name-candidates "subshell")))  ; reserved word
+  (let ((sbsh::*functions* (make-hash-table :test 'equal)))
+    (setf (gethash "myfunc" sbsh::*functions*) t)         ; a defined function
+    (is (member "myfunc" (sbsh::command-name-candidates "myf") :test #'string=))))
+
+(test completion-dirs-only
+  ;; cd-style completion returns only directories (each ends in "/")
+  (multiple-value-bind (names dir base) (sbsh::completion-candidates "" t)
+    (declare (ignore dir base))
+    (is-true (every (lambda (n) (char= (char n (1- (length n))) #\/)) names))))
